@@ -102,9 +102,15 @@ function saveTokenCache(tokens) {
  */
 function getAccessToken() {
   if (cachedTokens && cachedTokens.access_token) {
-    return cachedTokens.access_token;
+    // Ensure the cached token has not expired
+    if (cachedTokens.expires_at && cachedTokens.expires_at > Date.now()) {
+      return cachedTokens.access_token;
+    }
+
+    // Clear expired cache before falling back to disk
+    cachedTokens = null;
   }
-  
+
   const tokens = loadTokenCache();
   return tokens ? tokens.access_token : null;
 }
