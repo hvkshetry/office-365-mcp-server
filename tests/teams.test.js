@@ -104,6 +104,45 @@ describe('Teams Module - Consolidated Tools', () => {
       expect(result.content[0].text).toContain('Found 1 channels');
       expect(result.content[0].text).toContain('General');
     });
+
+    it('should add channel member using email', async () => {
+      // Mock user lookup
+      callGraphAPI.mockResolvedValueOnce({ value: [{ id: 'user123' }] });
+      // Mock add member response
+      callGraphAPI.mockResolvedValueOnce({ id: 'member123' });
+
+      const result = await channelTool.handler({
+        operation: 'add_member',
+        teamId: 'team-id',
+        channelId: 'channel-id',
+        email: 'member@example.com',
+        roles: ['owner']
+      });
+
+      expect(callGraphAPI).toHaveBeenNthCalledWith(1,
+        'mock-access-token',
+        'GET',
+        'users',
+        null,
+        {
+          $filter: "mail eq 'member@example.com' or userPrincipalName eq 'member@example.com'",
+          $select: 'id'
+        }
+      );
+
+      expect(callGraphAPI).toHaveBeenNthCalledWith(2,
+        'mock-access-token',
+        'POST',
+        'teams/team-id/channels/channel-id/members',
+        {
+          '@odata.type': '#microsoft.graph.aadUserConversationMember',
+          'user@odata.bind': "https://graph.microsoft.com/v1.0/users('user123')",
+          roles: ['owner']
+        }
+      );
+
+      expect(result.content[0].text).toContain('Member added successfully');
+    });
   });
 
   describe('teams_chat tool', () => {

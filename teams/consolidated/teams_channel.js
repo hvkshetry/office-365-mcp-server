@@ -565,12 +565,44 @@ async function addChannelMember(accessToken, params) {
     };
   }
   
+  // Determine the member to add
+  let userIdentifier;
+  if (userId) {
+    userIdentifier = userId;
+  } else if (email) {
+    // Try to resolve email to user ID
+    try {
+      const userResponse = await callGraphAPI(
+        accessToken,
+        'GET',
+        'users',
+        null,
+        {
+          $filter: `mail eq '${email}' or userPrincipalName eq '${email}'`,
+          $select: 'id'
+        }
+      );
+
+      if (userResponse.value && userResponse.value.length > 0) {
+        userIdentifier = userResponse.value[0].id;
+      } else {
+        return {
+          content: [{ type: 'text', text: `Unable to find a user with email: ${email}` }]
+        };
+      }
+    } catch (error) {
+      console.error('Error resolving email to user ID:', error);
+      return {
+        content: [{ type: 'text', text: `Error resolving email to user ID: ${error.message}` }]
+      };
+    }
+  }
+
   const memberData = {
-    '@odata.type': '#microsoft.graph.aadUserConversationMember'
+    '@odata.type': '#microsoft.graph.aadUserConversationMember',
+    'user@odata.bind': `https://graph.microsoft.com/v1.0/users('${userIdentifier}')`
   };
-  
-  if (userId) memberData.userId = userId;
-  if (email) memberData.email = email;
+
   if (displayName) memberData.displayName = displayName;
   if (roles && Array.isArray(roles) && roles.length > 0) memberData.roles = roles;
   
