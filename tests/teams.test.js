@@ -70,6 +70,27 @@ describe('Teams Module - Consolidated Tools', () => {
       expect(result.content[0].text).toContain('Meeting created successfully');
       expect(result.content[0].text).toContain(mockMeeting.joinWebUrl);
     });
+
+    it('should display numeric duration when listing recordings', async () => {
+      const mockRecordings = {
+        value: [
+          {
+            id: 'rec1',
+            createdDateTime: '2025-05-20T13:00:00Z',
+            duration: 'PT1M30S'
+          }
+        ]
+      };
+
+      callGraphAPI.mockResolvedValue(mockRecordings);
+
+      const result = await meetingTool.handler({
+        operation: 'list_recordings',
+        meetingId: 'meeting-id'
+      });
+
+      expect(result.content[0].text).toContain('Duration: 1m 30s');
+    });
   });
 
   describe('teams_channel tool', () => {
