@@ -126,16 +126,23 @@ cp .env.example .env
 # - OFFICE_CLIENT_SECRET: Your client secret value
 ```
 
-### 5. Start the Authentication Server
+### 5. Start the Servers
 
-The authentication server handles the OAuth2 flow:
+Both the authentication server and the MCP server must be running before you can
+use any Office MCP tools. On Windows you can start them together using the
+included batch file:
 
 ```bash
-# Windows
-start-auth-server.bat
+# Windows – launch both servers
+run-office-mcp.bat
+
+# Or start them individually
+start-auth-server.bat   # authentication server
+npm start               # MCP server
 
 # macOS/Linux
 ./start-auth-server.sh
+npm start
 ```
 
 ### 6. Configure Claude Desktop
@@ -159,7 +166,7 @@ Add to your Claude Desktop configuration:
 
 ## Authentication Flow
 
-1. Start the authentication server (runs on port 3333)
+1. Ensure both the authentication server (runs on port 3333) and the MCP server are running
 2. Use the `authenticate` tool in Claude to initiate OAuth2 flow
 3. A browser window opens for Microsoft login
 4. After successful login, tokens are stored locally
