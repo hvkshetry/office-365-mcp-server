@@ -690,7 +690,8 @@ async function listRecordings(accessToken, params) {
     
     // Format the recording list
     const recordingList = response.value.map((recording, index) => {
-      return `${index + 1}. Created: ${new Date(recording.createdDateTime).toLocaleString()}\n   ID: ${recording.id}\n   Duration: ${formatDuration(recording.meetingChatId || 'Unknown')}\n`;
+      const durationStr = formatDuration(recording.duration);
+      return `${index + 1}. Created: ${new Date(recording.createdDateTime).toLocaleString()}\n   ID: ${recording.id}\n   Duration: ${durationStr}\n`;
     }).join('\n');
     
     return {
@@ -713,18 +714,43 @@ async function listRecordings(accessToken, params) {
 /**
  * Format duration in seconds to readable format
  */
-function formatDuration(seconds) {
+function formatDuration(duration) {
+  if (duration === undefined || duration === null) return 'Unknown';
+
+  let seconds;
+
+  if (typeof duration === 'string') {
+    // Handle ISO 8601 duration strings like PT1H2M3S
+    const match = duration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+    if (match) {
+      const hours = parseInt(match[1] || '0', 10);
+      const minutes = parseInt(match[2] || '0', 10);
+      const secs = parseInt(match[3] || '0', 10);
+      seconds = hours * 3600 + minutes * 60 + secs;
+    } else if (!isNaN(duration)) {
+      // Fallback if string is numeric
+      seconds = Number(duration);
+    } else {
+      return 'Unknown';
+    }
+  } else if (typeof duration === 'number') {
+    // Assume milliseconds if large value
+    seconds = duration > 1000 ? Math.floor(duration / 1000) : Math.floor(duration);
+  } else {
+    return 'Unknown';
+  }
+
   if (isNaN(seconds)) return 'Unknown';
-  
+
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
   const remainingSeconds = Math.floor(seconds % 60);
-  
+
   let result = '';
   if (hours > 0) result += `${hours}h `;
   if (minutes > 0 || hours > 0) result += `${minutes}m `;
   result += `${remainingSeconds}s`;
-  
+
   return result.trim();
 }
 
