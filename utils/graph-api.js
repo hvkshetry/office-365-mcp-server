@@ -24,10 +24,8 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
   try {
     console.error(`Making real API call: ${method} ${path}`);
     
-    // Encode path segments properly
-    const encodedPath = path.split('/')
-      .map(segment => encodeURIComponent(segment))
-      .join('/');
+    // Encode the entire path while preserving special characters like ':/'
+    const encodedPath = encodeURI(path);
     
     // Build query string from parameters with special handling for OData filters
     let queryString = '';
