@@ -673,53 +673,80 @@ const filesTools = [
         const url = new URL(webUrl);
         const pathParts = decodeURIComponent(url.pathname).split('/').filter(p => p);
         
-        // Find document library indicator
-        let docIndex = -1;
-        for (let i = 0; i < pathParts.length; i++) {
-          if (pathParts[i].includes('Documents') || pathParts[i] === 'Shared') {
-            docIndex = i;
-            break;
+        // Find the site name and document library
+        let siteName = '';
+        let docLibraryIndex = -1;
+        let pathAfterDocLib = [];
+        
+        // Look for pattern: /sites/[site-name]/[document-library]/...
+        const sitesIndex = pathParts.findIndex(p => p === 'sites');
+        if (sitesIndex !== -1 && sitesIndex + 1 < pathParts.length) {
+          siteName = pathParts[sitesIndex + 1];
+          
+          // Find document library (usually "Shared Documents" or similar)
+          for (let i = sitesIndex + 2; i < pathParts.length; i++) {
+            if (pathParts[i].includes('Documents') || pathParts[i] === 'Shared') {
+              docLibraryIndex = i;
+              // Skip the library name itself, get the path after it
+              pathAfterDocLib = pathParts.slice(i + 1);
+              break;
+            }
           }
         }
         
-        // If no document indicator found, look for 'sites'
-        if (docIndex === -1) {
-          const sitesIndex = pathParts.findIndex(p => p === 'sites');
-          if (sitesIndex !== -1 && sitesIndex + 1 < pathParts.length) {
-            docIndex = sitesIndex + 2; // Skip 'sites' and site name
+        // If we couldn't find the document library, try a simpler approach
+        if (docLibraryIndex === -1) {
+          // Look for any "Documents" in the path
+          for (let i = 0; i < pathParts.length; i++) {
+            if (pathParts[i].includes('Documents')) {
+              docLibraryIndex = i;
+              pathAfterDocLib = pathParts.slice(i + 1);
+              break;
+            }
           }
         }
         
-        if (docIndex === -1 || docIndex >= pathParts.length) {
-          return {
-            content: [{
-              type: "text",
-              text: `Unable to parse SharePoint path from URL: ${webUrl}`
-            }]
-          };
+        // Transform the site name for local folder
+        let localSiteFolderName = '';
+        if (siteName) {
+          // Transform SharePoint site name to local folder name
+          // Examples:
+          // "Intema-UASBInternals" -> "Intema - UASB Internals - Documents"
+          // "ProjectName-SubProject" -> "ProjectName - SubProject - Documents"
+          
+          // Replace hyphens with spaces and add proper formatting
+          localSiteFolderName = siteName
+            .replace(/([a-z])([A-Z])/g, '$1 $2') // Add space between camelCase
+            .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2') // Add space between consecutive caps and following word
+            .replace(/-/g, ' - ') // Replace hyphens with space-hyphen-space
+            .replace(/\s+/g, ' ') // Clean up multiple spaces
+            .trim();
+          
+          // Add "- Documents" suffix if it's a project folder
+          if (!localSiteFolderName.endsWith('- Documents') && localSiteFolderName.includes(' - ')) {
+            localSiteFolderName += ' - Documents';
+          }
         }
         
-        // Extract file path components after document library
-        const fileParts = pathParts.slice(docIndex + 1);
+        // Build the complete local path
+        const pathComponents = [];
         
-        // Apply transformation rules for project folders
-        const transformedParts = fileParts.map((part, index) => {
-          // Add "- Documents" suffix to project folders (first level)
-          if (index === 0 && !part.endsWith('- Documents') && part.includes(' - ') && 
-              !part.match(/\.(xlsx|docx|pdf|pptx|txt)$/i)) {
-            return part + ' - Documents';
-          }
-          return part;
-        });
+        // Add the transformed site folder if we have one
+        if (localSiteFolderName) {
+          pathComponents.push(localSiteFolderName);
+        }
+        
+        // Add the rest of the path
+        pathComponents.push(...pathAfterDocLib);
         
         // Construct the local path
-        const localPath = transformedParts.length > 0 
-          ? `${baseSyncPath}/${transformedParts.join('/')}`
+        const localPath = pathComponents.length > 0 
+          ? `${baseSyncPath}/${pathComponents.join('/')}`
           : baseSyncPath;
         
         // Also provide symlink path for subagent use
-        const symlinkPath = transformedParts.length > 0
-          ? `/home/hvksh/admin/temp/sharepoint/${transformedParts.join('/')}`
+        const symlinkPath = pathComponents.length > 0
+          ? `/home/hvksh/admin/temp/sharepoint/${pathComponents.join('/')}`
           : '/home/hvksh/admin/temp/sharepoint';
         
         return {
