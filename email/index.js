@@ -72,10 +72,25 @@ async function handleEmail(args) {
 }
 
 /**
- * Unified email search handler with different modes
+ * Unified email search handler - single powerful search with automatic optimization
  */
 async function handleEmailSearch(args) {
-  const { query, mode = 'basic', maxResults = 10, filterType, from, subject } = args;
+  const { 
+    query,           // Required: KQL or natural language
+    from,            // Optional: sender email filter
+    to,              // Optional: recipient email filter
+    subject,         // Optional: subject line filter
+    hasAttachments,  // Optional: boolean
+    isRead,          // Optional: boolean
+    importance,      // Optional: high/normal/low
+    startDate,       // Optional: ISO or relative (7d/1w/1m/1y)
+    endDate,         // Optional: ISO or relative
+    folderId,        // Optional: folder ID to search in
+    folderName,      // Optional: folder name (auto-converts to ID)
+    maxResults = 25, // Optional: max 1000
+    useRelevance = false, // Optional: relevance vs date sort
+    includeDeleted = false // Optional: include deleted items
+  } = args;
   
   if (!query) {
     return {
@@ -89,23 +104,88 @@ async function handleEmailSearch(args) {
   try {
     const accessToken = await ensureAuthenticated();
     
-    switch (mode) {
-      case 'basic':
-        return await searchEmailsBasic(accessToken, { query, from, subject, maxResults });
-      case 'enhanced':
-        return await searchEmailsEnhanced(accessToken, { query, maxResults });
-      case 'simple':
-        return await searchEmailsSimple(accessToken, { query, filterType, maxResults });
-      default:
+    // Handle folder filtering
+    let searchEndpoint = 'me/messages';
+    let folderToSearch = null;
+    
+    if (folderId) {
+      folderToSearch = folderId;
+    } else if (folderName) {
+      // Convert folder name to ID
+      folderToSearch = await getFolderIdByName(accessToken, folderName);
+      if (!folderToSearch) {
         return {
           content: [{ 
             type: "text", 
-            text: `Invalid mode: ${mode}. Valid modes are: basic, enhanced, simple` 
+            text: `Folder '${folderName}' not found. Check folder name or use folderId.` 
           }]
         };
+      }
+    }
+    
+    if (folderToSearch) {
+      searchEndpoint = `me/mailFolders/${folderToSearch}/messages`;
+    }
+    
+    // Build KQL query from parameters
+    const kqlQuery = buildKQLQuery({
+      query,
+      from,
+      to,
+      subject,
+      hasAttachments,
+      isRead,
+      importance,
+      startDate,
+      endDate
+    });
+    
+    console.error(`Unified search - KQL Query: ${kqlQuery}`);
+    console.error(`Search endpoint: ${searchEndpoint}`);
+    
+    // Three-tier execution strategy
+    
+    // Tier 1: Try Microsoft Search API (most powerful)
+    if (useRelevance || isComplexKQLQuery(kqlQuery)) {
+      try {
+        return await searchUsingMicrosoftSearchAPI(accessToken, {
+          query: kqlQuery,
+          maxResults,
+          useRelevance,
+          includeDeleted
+        });
+      } catch (error) {
+        console.error('Microsoft Search API failed, falling back:', error.message);
+      }
+    }
+    
+    // Tier 2: Try $search with KQL
+    try {
+      return await searchUsingGraphSearch(accessToken, {
+        query: kqlQuery,
+        endpoint: searchEndpoint,
+        maxResults
+      });
+    } catch (error) {
+      console.error('Graph $search failed, falling back to $filter:', error.message);
+      
+      // Tier 3: Fall back to $filter
+      return await searchUsingFilter(accessToken, {
+        query,
+        from,
+        to,
+        subject,
+        hasAttachments,
+        isRead,
+        importance,
+        startDate,
+        endDate,
+        endpoint: searchEndpoint,
+        maxResults
+      });
     }
   } catch (error) {
-    console.error(`Error in email search (${mode}):`, error);
+    console.error('Error in unified email search:', error);
     return {
       content: [{ type: "text", text: `Error in email search: ${error.message}` }]
     };
@@ -403,6 +483,375 @@ async function sendEmail(accessToken, params) {
     };
   }
 }
+
+// ============== NEW UNIFIED SEARCH HELPER FUNCTIONS ==============
+
+/**
+ * Convert folder name to folder ID
+ */
+async function getFolderIdByName(accessToken, folderName) {
+  // Check well-known folder names first
+  const wellKnownFolders = {
+    'inbox': 'inbox',
+    'sent': 'sentitems',
+    'sent items': 'sentitems', 
+    'drafts': 'drafts',
+    'deleted': 'deleteditems',
+    'deleted items': 'deleteditems',
+    'junk': 'junkemail',
+    'junk email': 'junkemail',
+    'archive': 'archive'
+  };
+  
+  const lowerName = folderName.toLowerCase();
+  if (wellKnownFolders[lowerName]) {
+    return wellKnownFolders[lowerName];
+  }
+  
+  // Search for custom folder by name
+  try {
+    const response = await callGraphAPI(
+      accessToken,
+      'GET',
+      'me/mailFolders',
+      null,
+      { 
+        $filter: `displayName eq '${folderName}'`,
+        $select: 'id,displayName'
+      }
+    );
+    
+    if (response.value && response.value.length > 0) {
+      return response.value[0].id;
+    }
+  } catch (error) {
+    console.error(`Error finding folder by name: ${error.message}`);
+  }
+  
+  return null;
+}
+
+/**
+ * Build KQL query from parameters
+ */
+function buildKQLQuery(params) {
+  let kql = [];
+  
+  // Check if query is already in KQL format
+  if (params.query && isKQLFormat(params.query)) {
+    kql.push(params.query);
+  } else if (params.query) {
+    // Convert natural language to KQL - search in subject, body, and from
+    kql.push(`(subject:"${params.query}" OR body:"${params.query}" OR from:"${params.query}")`);
+  }
+  
+  // Add filters
+  if (params.from) {
+    kql.push(`from:${params.from}`);
+  }
+  if (params.to) {
+    kql.push(`to:${params.to}`);
+  }
+  if (params.subject && !isKQLFormat(params.query)) {
+    kql.push(`subject:"${params.subject}"`);
+  }
+  if (params.hasAttachments !== undefined) {
+    kql.push(`hasattachment:${params.hasAttachments}`);
+  }
+  if (params.isRead !== undefined) {
+    kql.push(`isread:${params.isRead}`);
+  }
+  if (params.importance) {
+    kql.push(`importance:${params.importance}`);
+  }
+  
+  // Date ranges
+  if (params.startDate) {
+    const date = parseRelativeDate(params.startDate);
+    kql.push(`received>=${date}`);
+  }
+  if (params.endDate) {
+    const date = parseRelativeDate(params.endDate);
+    kql.push(`received<=${date}`);
+  }
+  
+  return kql.length > 0 ? kql.join(' AND ') : '';
+}
+
+/**
+ * Check if query contains KQL operators
+ */
+function isKQLFormat(query) {
+  // Check for KQL operators
+  const kqlOperators = [
+    ':',      // Property separator
+    ' AND ',  // Boolean AND
+    ' OR ',   // Boolean OR
+    ' NOT ',  // Boolean NOT
+    'from:',
+    'to:',
+    'subject:',
+    'body:',
+    'hasattachment:',
+    'isread:',
+    'importance:',
+    'received:'
+  ];
+  
+  return kqlOperators.some(op => query.includes(op));
+}
+
+/**
+ * Check if query is complex enough to warrant Microsoft Search API
+ */
+function isComplexKQLQuery(query) {
+  // Complex queries have multiple operators or date ranges
+  const operatorCount = (query.match(/ AND | OR | NOT /g) || []).length;
+  const hasDateRange = query.includes('received>=') || query.includes('received<=');
+  const hasMultipleFilters = (query.match(/:/g) || []).length > 2;
+  
+  return operatorCount > 1 || hasDateRange || hasMultipleFilters;
+}
+
+/**
+ * Parse relative date strings like '7d', '1w', '1m', '1y'
+ */
+function parseRelativeDate(dateStr) {
+  // If already ISO format, return as-is
+  if (dateStr.match(/^\d{4}-\d{2}-\d{2}/)) {
+    return dateStr;
+  }
+  
+  // Handle relative dates
+  if (dateStr.match(/^\d+[dwmy]$/)) {
+    const num = parseInt(dateStr);
+    const unit = dateStr.slice(-1);
+    const date = new Date();
+    
+    switch(unit) {
+      case 'd': // days
+        date.setDate(date.getDate() - num);
+        break;
+      case 'w': // weeks
+        date.setDate(date.getDate() - (num * 7));
+        break;
+      case 'm': // months
+        date.setMonth(date.getMonth() - num);
+        break;
+      case 'y': // years
+        date.setFullYear(date.getFullYear() - num);
+        break;
+    }
+    
+    return date.toISOString().split('T')[0];
+  }
+  
+  return dateStr;
+}
+
+/**
+ * Search using Microsoft Search API for relevance ranking
+ */
+async function searchUsingMicrosoftSearchAPI(accessToken, params) {
+  const { query, maxResults, useRelevance, includeDeleted } = params;
+  
+  const searchPayload = {
+    requests: [
+      {
+        entityTypes: ["message"],
+        query: {
+          queryString: query
+        },
+        from: 0,
+        size: Math.min(maxResults, 1000),
+        fields: ["subject", "from", "toRecipients", "receivedDateTime", "hasAttachments", "id", "bodyPreview", "importance", "isRead"],
+        enableTopResults: useRelevance
+      }
+    ]
+  };
+  
+  const response = await callGraphAPI(
+    accessToken,
+    'POST',
+    'search/query',
+    searchPayload
+  );
+  
+  const hits = response.value[0]?.hitsContainers[0]?.hits || [];
+  
+  if (hits.length === 0) {
+    return {
+      content: [{ type: "text", text: "No emails found matching your search." }]
+    };
+  }
+  
+  const emailsList = hits.map(hit => {
+    const resource = hit.resource;
+    const attachments = resource.hasAttachments ? ' 📎' : '';
+    const emailId = resource.id || hit.hitId || 'Not available';
+    const fromAddress = resource.from?.emailAddress?.address || resource.from || 'Unknown sender';
+    const importance = resource.importance ? ` [${resource.importance}]` : '';
+    const unread = resource.isRead === false ? ' *' : '';
+    
+    return `- ${resource.subject}${attachments}${importance}${unread}\n  From: ${fromAddress}\n  Date: ${new Date(resource.receivedDateTime).toLocaleString()}\n  ID: ${emailId}\n`;
+  }).join('\n');
+  
+  const sortNote = useRelevance ? ' (sorted by relevance)' : ' (sorted by date)';
+  
+  return {
+    content: [{ 
+      type: "text", 
+      text: `Found ${hits.length} emails${sortNote}:\n\n${emailsList}` 
+    }]
+  };
+}
+
+/**
+ * Search using Graph API $search parameter
+ */
+async function searchUsingGraphSearch(accessToken, params) {
+  const { query, endpoint, maxResults } = params;
+  
+  const queryParams = {
+    $search: `"${query}"`,
+    $top: Math.min(maxResults, 250),
+    $select: config.EMAIL_SELECT_FIELDS
+    // Note: $orderby cannot be used with $search
+  };
+  
+  const response = await callGraphAPI(
+    accessToken,
+    'GET',
+    endpoint,
+    null,
+    queryParams
+  );
+  
+  if (!response.value || response.value.length === 0) {
+    return {
+      content: [{ type: "text", text: "No emails found matching your search." }]
+    };
+  }
+  
+  const emailsList = response.value.map(email => {
+    const attachments = email.hasAttachments ? ' 📎' : '';
+    const importance = email.importance !== 'normal' ? ` [${email.importance}]` : '';
+    const unread = !email.isRead ? ' *' : '';
+    
+    return `- ${email.subject}${attachments}${importance}${unread}\n  From: ${email.from.emailAddress.address}\n  Date: ${new Date(email.receivedDateTime).toLocaleString()}\n  ID: ${email.id}\n`;
+  }).join('\n');
+  
+  return {
+    content: [{ 
+      type: "text", 
+      text: `Found ${response.value.length} emails:\n\n${emailsList}` 
+    }]
+  };
+}
+
+/**
+ * Search using $filter parameter (most reliable fallback)
+ */
+async function searchUsingFilter(accessToken, params) {
+  const { 
+    query, 
+    from, 
+    to, 
+    subject, 
+    hasAttachments, 
+    isRead, 
+    importance, 
+    startDate, 
+    endDate, 
+    endpoint, 
+    maxResults 
+  } = params;
+  
+  let filters = [];
+  
+  // Build filter conditions
+  if (query && !from && !subject) {
+    // Simple text search in subject or body preview
+    filters.push(`(contains(subject, '${query}') or contains(bodyPreview, '${query}'))`);
+  }
+  
+  if (from) {
+    filters.push(`from/emailAddress/address eq '${from}'`);
+  }
+  
+  if (to) {
+    filters.push(`toRecipients/any(r: r/emailAddress/address eq '${to}')`);
+  }
+  
+  if (subject) {
+    filters.push(`contains(subject, '${subject}')`);
+  }
+  
+  if (hasAttachments !== undefined) {
+    filters.push(`hasAttachments eq ${hasAttachments}`);
+  }
+  
+  if (isRead !== undefined) {
+    filters.push(`isRead eq ${isRead}`);
+  }
+  
+  if (importance) {
+    filters.push(`importance eq '${importance}'`);
+  }
+  
+  if (startDate) {
+    const date = parseRelativeDate(startDate);
+    filters.push(`receivedDateTime ge ${date}T00:00:00Z`);
+  }
+  
+  if (endDate) {
+    const date = parseRelativeDate(endDate);
+    filters.push(`receivedDateTime le ${date}T23:59:59Z`);
+  }
+  
+  const filterQuery = filters.length > 0 ? filters.join(' and ') : null;
+  
+  const queryParams = {
+    $top: Math.min(maxResults, 250),
+    $select: config.EMAIL_SELECT_FIELDS,
+    $orderby: 'receivedDateTime desc'
+  };
+  
+  if (filterQuery) {
+    queryParams.$filter = filterQuery;
+  }
+  
+  const response = await callGraphAPI(
+    accessToken,
+    'GET',
+    endpoint,
+    null,
+    queryParams
+  );
+  
+  if (!response.value || response.value.length === 0) {
+    return {
+      content: [{ type: "text", text: "No emails found matching your search." }]
+    };
+  }
+  
+  const emailsList = response.value.map(email => {
+    const attachments = email.hasAttachments ? ' 📎' : '';
+    const importance = email.importance !== 'normal' ? ` [${email.importance}]` : '';
+    const unread = !email.isRead ? ' *' : '';
+    
+    return `- ${email.subject}${attachments}${importance}${unread}\n  From: ${email.from.emailAddress.address}\n  Date: ${new Date(email.receivedDateTime).toLocaleString()}\n  ID: ${email.id}\n`;
+  }).join('\n');
+  
+  return {
+    content: [{ 
+      type: "text", 
+      text: `Found ${response.value.length} emails (using filter fallback):\n\n${emailsList}` 
+    }]
+  };
+}
+
+// ============== ORIGINAL SEARCH FUNCTIONS (DEPRECATED) ==============
 
 async function searchEmailsBasic(accessToken, params) {
   const { query, from, subject, maxResults } = params;
@@ -921,25 +1370,66 @@ const emailTools = [
   },
   {
     name: "email_search",
-    description: "Search emails with different modes: basic, enhanced, or simple",
+    description: "Unified email search with KQL support, folder filtering, and automatic optimization",
     inputSchema: {
       type: "object",
       properties: {
-        query: { type: "string", description: "Search query string" },
-        mode: { 
+        query: { 
           type: "string", 
-          enum: ["basic", "enhanced", "simple"],
-          description: "Search mode (default: basic)" 
+          description: "Search text or KQL syntax (e.g., 'project' or 'from:john@example.com AND subject:report')" 
         },
-        maxResults: { type: "number", description: "Maximum number of results (default: 10)" },
-        // Basic mode parameters
-        from: { type: "string", description: "Filter by sender (basic mode)" },
-        subject: { type: "string", description: "Filter by subject (basic mode)" },
-        // Simple mode parameters
-        filterType: { 
+        from: { 
           type: "string", 
-          enum: ["subject", "from", "body"],
-          description: "Type of filter for simple mode (default: subject)" 
+          description: "Filter by sender email address" 
+        },
+        to: { 
+          type: "string", 
+          description: "Filter by recipient email address" 
+        },
+        subject: { 
+          type: "string", 
+          description: "Filter by subject line" 
+        },
+        hasAttachments: { 
+          type: "boolean", 
+          description: "Filter emails with/without attachments" 
+        },
+        isRead: { 
+          type: "boolean", 
+          description: "Filter by read/unread status" 
+        },
+        importance: { 
+          type: "string", 
+          enum: ["high", "normal", "low"],
+          description: "Filter by importance level" 
+        },
+        startDate: { 
+          type: "string", 
+          description: "Start date - ISO format (2025-08-01) or relative (7d/1w/1m/1y)" 
+        },
+        endDate: { 
+          type: "string", 
+          description: "End date - ISO format or relative" 
+        },
+        folderId: { 
+          type: "string",
+          description: "Specific folder ID to search in"
+        },
+        folderName: { 
+          type: "string",
+          description: "Folder name (inbox/sent/drafts/deleted/junk/archive or custom name)"
+        },
+        maxResults: { 
+          type: "number", 
+          description: "Max results 1-1000 (default: 25)" 
+        },
+        useRelevance: { 
+          type: "boolean", 
+          description: "Sort by relevance instead of date (uses Microsoft Search API)" 
+        },
+        includeDeleted: { 
+          type: "boolean", 
+          description: "Include deleted items in search results" 
         }
       },
       required: ["query"]

@@ -47,7 +47,44 @@ This document tracks potential improvements and feature requests for the Office 
 
 ## Email Management
 
-### 2. Batch Email Operations
+### 2. ✅ COMPLETED: Unified Email Search with Advanced Capabilities
+**Priority:** High  
+**Date Completed:** August 24, 2025  
+**Implemented By:** Assistant with user hvksh
+
+**Previous Limitations:**
+- Three separate search modes (basic, enhanced, simple) causing confusion
+- Limited KQL (Keyword Query Language) support
+- No folder-specific search capability
+- No date range filtering
+- Limited filter combinations
+- No relevance ranking option
+
+**Implemented Solution:**
+- Single unified `email_search` tool with automatic optimization
+- Full KQL syntax support with auto-detection
+- Folder search by name or ID with well-known folder mapping
+- Date range filtering with relative dates (7d, 1w, 1m, 1y)
+- Comprehensive filter parameters (hasAttachments, isRead, importance, etc.)
+- Three-tier execution strategy: Microsoft Search API → $search → $filter
+- Relevance ranking option using Microsoft Search API
+- Smart query builder that converts natural language to KQL
+
+**Key Features Added:**
+1. **KQL Support**: Full support for complex queries like `from:john@example.com AND (subject:report OR body:analysis)`
+2. **Folder Search**: Search specific folders by name (`folderName: "inbox"`) or ID
+3. **Date Filtering**: Support for both ISO dates and relative dates (`startDate: "7d"`)
+4. **Smart Fallbacks**: Automatic fallback from advanced to simple search methods
+5. **Relevance Ranking**: Option to sort by relevance instead of date
+6. **Natural Language**: Automatically converts simple queries to KQL format
+
+**Files Modified:**
+- `/mnt/c/Users/hvksh/mcp-servers/office-mcp/email/index.js` - Complete rewrite of search functionality
+- `/home/hvksh/admin/CLAUDE.md` - Updated with AI-optimized documentation
+
+---
+
+### 3. Batch Email Operations
 **Priority:** Medium  
 **Date Identified:** May 23, 2025  
 
@@ -129,4 +166,4 @@ If you identify additional improvements or limitations:
 
 ---
 
-Last Updated: May 23, 2025
+Last Updated: August 24, 2025
