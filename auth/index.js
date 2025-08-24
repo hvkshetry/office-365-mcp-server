@@ -16,13 +16,24 @@ async function ensureAuthenticated(forceNew = false) {
     throw new Error('Authentication required');
   }
   
-  // Check for existing token
-  const accessToken = tokenManager.getAccessToken();
-  if (!accessToken) {
-    throw new Error('Authentication required');
+  try {
+    // Check for existing token with auto-refresh
+    const accessToken = await tokenManager.getAccessToken(true);
+    if (!accessToken) {
+      throw new Error('Authentication required');
+    }
+    
+    return accessToken;
+  } catch (error) {
+    console.error('[AUTH] Error ensuring authentication:', error.message);
+    
+    // If refresh failed, throw authentication required error
+    if (error.message.includes('refresh') || error.message.includes('authentication')) {
+      throw new Error('Authentication required - please run the authenticate tool');
+    }
+    
+    throw error;
   }
-  
-  return accessToken;
 }
 
 module.exports = {

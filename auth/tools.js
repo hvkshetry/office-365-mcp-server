@@ -71,8 +71,24 @@ async function handleCheckAuthStatus() {
   console.error(`[CHECK-AUTH-STATUS] Token expires at: ${tokens.expires_at}`);
   console.error(`[CHECK-AUTH-STATUS] Current time: ${Date.now()}`);
   
+  // Check if token needs refresh
+  const { needsRefresh } = require('./auto-refresh');
+  if (needsRefresh(tokens)) {
+    const timeLeft = Math.max(0, (tokens.expires_at - Date.now()) / 1000 / 60);
+    return {
+      content: [{ 
+        type: "text", 
+        text: `Authenticated - token expires in ${timeLeft.toFixed(1)} minutes (will auto-refresh)` 
+      }]
+    };
+  }
+  
+  const timeLeft = (tokens.expires_at - Date.now()) / 1000 / 60;
   return {
-    content: [{ type: "text", text: "Authenticated and ready" }]
+    content: [{ 
+      type: "text", 
+      text: `Authenticated and ready - token valid for ${timeLeft.toFixed(1)} minutes` 
+    }]
   };
 }
 

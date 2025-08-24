@@ -3,6 +3,7 @@
  */
 const fs = require('fs');
 const config = require('../config');
+const { refreshAccessToken, needsRefresh } = require('./auto-refresh');
 
 // Global variable to store tokens
 let cachedTokens = null;
@@ -98,15 +99,48 @@ function saveTokenCache(tokens) {
 
 /**
  * Gets the current access token, loading from cache if necessary
- * @returns {string|null} - The access token or null if not available
+ * @param {boolean} autoRefresh - Whether to automatically refresh expired tokens
+ * @returns {Promise<string>|string|null} - The access token or null if not available
  */
-function getAccessToken() {
+async function getAccessToken(autoRefresh = true) {
+  // First check cache
   if (cachedTokens && cachedTokens.access_token) {
+    if (autoRefresh && needsRefresh(cachedTokens)) {
+      console.error('[TOKEN-MANAGER] Cached token needs refresh');
+      try {
+        const newTokens = await refreshAccessToken();
+        cachedTokens = newTokens;
+        return newTokens.access_token;
+      } catch (error) {
+        console.error('[TOKEN-MANAGER] Auto-refresh failed:', error.message);
+        // Return existing token if refresh fails (might still work briefly)
+        return cachedTokens.access_token;
+      }
+    }
     return cachedTokens.access_token;
   }
   
+  // Load from file
   const tokens = loadTokenCache();
-  return tokens ? tokens.access_token : null;
+  if (!tokens || !tokens.access_token) {
+    return null;
+  }
+  
+  // Check if refresh needed
+  if (autoRefresh && needsRefresh(tokens)) {
+    console.error('[TOKEN-MANAGER] Token needs refresh');
+    try {
+      const newTokens = await refreshAccessToken();
+      cachedTokens = newTokens;
+      return newTokens.access_token;
+    } catch (error) {
+      console.error('[TOKEN-MANAGER] Auto-refresh failed:', error.message);
+      // Return existing token if refresh fails
+      return tokens.access_token;
+    }
+  }
+  
+  return tokens.access_token;
 }
 
 /**

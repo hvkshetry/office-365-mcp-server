@@ -2,6 +2,8 @@
 
 This is a comprehensive implementation of the Office MCP (Model Context Protocol) server that connects Claude with Microsoft 365 services through the Microsoft Graph API.
 
+> **🚀 Headless Operation!** Run without browser authentication after initial setup. Automatic token refresh and Windows Task Scheduler support for invisible background operation. See [TASK_SCHEDULER_SETUP.md](TASK_SCHEDULER_SETUP.md) for Windows setup guide.
+
 ## Full Tool Documentation
 For detailed documentation of all available tools and usage examples, see [TOOLS_DOCUMENTATION.md](./TOOLS_DOCUMENTATION.md)
 
@@ -95,7 +97,7 @@ To use this MCP server you need to first register and configure an app in Azure 
 4. Click on "New registration"
 5. Enter a name for the app, for example "Office MCP Server"
 6. Select the "Accounts in any organizational directory and personal Microsoft accounts" option
-7. In the "Redirect URI" section, select "Web" from the dropdown and enter "http://localhost:3333/auth/callback" in the textbox
+7. In the "Redirect URI" section, select "Web" from the dropdown and enter "http://localhost:3000/auth/callback" in the textbox
 8. Click on "Register"
 9. From the Overview section of the app settings page, copy the "Application (client) ID" and enter it as the OFFICE_CLIENT_ID in the .env file as well as in the claude-config-sample.json file
 
@@ -176,19 +178,40 @@ This will use the MCP Inspector to directly connect to the server and let you te
 1. Start the authentication server:
    - Windows: Run `start-auth-server.bat` or `run-office-mcp.bat`
    - Unix/Linux/macOS: Run `./start-auth-server.sh`
-2. The auth server runs on port 3333 and handles OAuth callbacks
+2. The auth server runs on port 3000 and handles OAuth callbacks
 3. In Claude, use the `authenticate` tool to get an authentication URL
 4. Complete the authentication in your browser
 5. Tokens are stored in `~/.office-mcp-tokens.json`
 
 ### Quick Start
 
-For Windows users, simply run:
-```bash
-run-office-mcp.bat
-```
+#### Windows - Automatic Background Operation
 
-This will start both the authentication server and the MCP server in separate windows.
+For completely headless operation on Windows:
+
+1. **One-time setup** - Complete initial authentication:
+   ```bash
+   npm run auth-server
+   # Visit http://localhost:3000/auth and sign in
+   ```
+
+2. **Install as scheduled task** (run as Administrator):
+   ```powershell
+   npm run setup:windows
+   ```
+
+The server will now start automatically with Windows and run invisibly in the background. See [TASK_SCHEDULER_SETUP.md](TASK_SCHEDULER_SETUP.md) for details.
+
+#### Manual Operation
+
+For manual testing or debugging:
+```bash
+# Windows
+run-office-mcp.bat
+
+# Unix/Linux/macOS
+./run-office-mcp.sh
+```
 
 ## Troubleshooting
 
