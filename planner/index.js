@@ -126,7 +126,10 @@ async function handleTaskOperations(args) {
           const assignees = Array.isArray(assignedTo) ? assignedTo : [assignedTo];
           
           for (const userId of assignees) {
-            taskData.assignments[userId] = { orderHint: ' !' };
+            taskData.assignments[userId] = { 
+              '@odata.type': '#microsoft.graph.plannerAssignment',
+              orderHint: ' !' 
+            };
           }
         }
         
@@ -389,7 +392,10 @@ async function handleTaskEnhanced(args) {
           const assignees = Array.isArray(assignedTo) ? assignedTo : [assignedTo];
           
           for (const userId of assignees) {
-            taskData.assignments[userId] = { orderHint: ' !' };
+            taskData.assignments[userId] = { 
+              '@odata.type': '#microsoft.graph.plannerAssignment',
+              orderHint: ' !' 
+            };
           }
         }
         

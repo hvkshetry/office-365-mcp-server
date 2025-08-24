@@ -162,7 +162,7 @@ function formatCalendarResponse(response) {
 }
 
 async function createCalendarEvent(accessToken, params) {
-  const { subject, content, start, end, location, attendees, isOnlineMeeting } = params;
+  const { subject, content, start, end, location, attendees, isOnlineMeeting, recurrence } = params;
   
   if (!subject || !start || !end) {
     return {
@@ -203,6 +203,28 @@ async function createCalendarEvent(accessToken, params) {
   if (isOnlineMeeting) {
     event.isOnlineMeeting = true;
     event.onlineMeetingProvider = "teamsForBusiness";
+  }
+  
+  // Add recurrence support
+  if (recurrence) {
+    event.recurrence = {
+      pattern: {
+        type: recurrence.pattern.type, // daily, weekly, absoluteMonthly, relativeMonthly, absoluteYearly, relativeYearly
+        interval: recurrence.pattern.interval || 1,
+        daysOfWeek: recurrence.pattern.daysOfWeek, // for weekly: ["monday", "wednesday"]
+        dayOfMonth: recurrence.pattern.dayOfMonth, // for absoluteMonthly
+        month: recurrence.pattern.month, // for yearly patterns
+        firstDayOfWeek: recurrence.pattern.firstDayOfWeek || 'sunday',
+        index: recurrence.pattern.index // for relativeMonthly: "first", "second", "third", "fourth", "last"
+      },
+      range: {
+        type: recurrence.range.type, // endDate, noEnd, numbered
+        startDate: recurrence.range.startDate,
+        endDate: recurrence.range.endDate,
+        numberOfOccurrences: recurrence.range.numberOfOccurrences,
+        recurrenceTimeZone: recurrence.range.recurrenceTimeZone || 'UTC'
+      }
+    };
   }
   
   const response = await callGraphAPI(
@@ -369,6 +391,51 @@ const calendarTools = [
           description: "Attendee email addresses (for create)" 
         },
         isOnlineMeeting: { type: "boolean", description: "Create as Teams meeting (for create/update)" },
+        // Recurrence parameters (for create)
+        recurrence: {
+          type: "object",
+          description: "Recurrence pattern and range for recurring events",
+          properties: {
+            pattern: {
+              type: "object",
+              properties: {
+                type: { 
+                  type: "string", 
+                  enum: ["daily", "weekly", "absoluteMonthly", "relativeMonthly", "absoluteYearly", "relativeYearly"],
+                  description: "Recurrence pattern type" 
+                },
+                interval: { type: "number", description: "Interval between occurrences" },
+                daysOfWeek: { 
+                  type: "array", 
+                  items: { type: "string" },
+                  description: "Days of week for weekly pattern (e.g., ['monday', 'wednesday'])" 
+                },
+                dayOfMonth: { type: "number", description: "Day of month for absoluteMonthly pattern" },
+                month: { type: "number", description: "Month for yearly patterns (1-12)" },
+                firstDayOfWeek: { type: "string", description: "First day of week (default: sunday)" },
+                index: { 
+                  type: "string",
+                  enum: ["first", "second", "third", "fourth", "last"],
+                  description: "Week index for relativeMonthly pattern" 
+                }
+              }
+            },
+            range: {
+              type: "object",
+              properties: {
+                type: { 
+                  type: "string", 
+                  enum: ["endDate", "noEnd", "numbered"],
+                  description: "Recurrence range type" 
+                },
+                startDate: { type: "string", description: "Start date in YYYY-MM-DD format" },
+                endDate: { type: "string", description: "End date in YYYY-MM-DD format (for endDate type)" },
+                numberOfOccurrences: { type: "number", description: "Number of occurrences (for numbered type)" },
+                recurrenceTimeZone: { type: "string", description: "Time zone for recurrence (default: UTC)" }
+              }
+            }
+          }
+        },
         // Get/Update/Delete parameters
         eventId: { type: "string", description: "Event ID (for get/update/delete)" },
         // Delete parameters

@@ -1,20 +1,48 @@
 /**
- * Microsoft Graph API helper functions
+ * Microsoft Graph API helper functions with enhanced error handling
  */
 const https = require('https');
 const config = require('../config');
 const mockData = require('./mock-data');
 
+// Retry configuration
+const RETRY_CONFIG = {
+  maxRetries: 3,
+  retryDelay: 1000, // Start with 1 second
+  retryableErrors: [429, 503, 504], // Rate limit and service unavailable
+  exponentialBackoff: true
+};
+
+// Error message enhancements
+const ERROR_SUGGESTIONS = {
+  401: 'Authentication token may have expired. Please re-authenticate.',
+  403: 'Insufficient permissions. Check if the app has the required Microsoft Graph permissions.',
+  404: 'Resource not found. Verify the ID or path is correct.',
+  429: 'Rate limit exceeded. The request will be retried automatically.',
+  500: 'Microsoft Graph service error. Please try again later.',
+  503: 'Service temporarily unavailable. The request will be retried automatically.'
+};
+
 /**
- * Makes a request to the Microsoft Graph API
+ * Sleep for specified milliseconds
+ * @param {number} ms - Milliseconds to sleep
+ */
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Makes a request to the Microsoft Graph API with retry logic
  * @param {string} accessToken - The access token for authentication
  * @param {string} method - HTTP method (GET, POST, etc.)
  * @param {string} path - API endpoint path
  * @param {object} data - Data to send for POST/PUT requests
  * @param {object} queryParams - Query parameters
+ * @param {object} customHeaders - Custom headers
+ * @param {number} retryCount - Current retry attempt (internal use)
  * @returns {Promise<object>} - The API response
  */
-async function callGraphAPI(accessToken, method, path, data = null, queryParams = {}, customHeaders = {}) {
+async function callGraphAPI(accessToken, method, path, data = null, queryParams = {}, customHeaders = {}, retryCount = 0) {
   // For test tokens, we'll simulate the API call
   if (config.USE_TEST_MODE && accessToken.startsWith('test_access_token_')) {
     console.error(`TEST MODE: Simulating ${method} ${path} API call`);
@@ -103,14 +131,45 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
             }
           } else if (res.statusCode === 401) {
             // Token expired or invalid
-            reject(new Error('UNAUTHORIZED'));
+            const suggestion = ERROR_SUGGESTIONS[401];
+            reject(new Error(`UNAUTHORIZED: ${suggestion}`));
           } else {
+            // Handle other errors with retry logic
+            const shouldRetry = RETRY_CONFIG.retryableErrors.includes(res.statusCode) && 
+                              retryCount < RETRY_CONFIG.maxRetries;
+            
+            if (shouldRetry) {
+              // Calculate delay with exponential backoff
+              const delay = RETRY_CONFIG.exponentialBackoff 
+                ? RETRY_CONFIG.retryDelay * Math.pow(2, retryCount)
+                : RETRY_CONFIG.retryDelay;
+              
+              console.error(`Request failed with status ${res.statusCode}. Retrying in ${delay}ms... (Attempt ${retryCount + 1}/${RETRY_CONFIG.maxRetries})`);
+              
+              // Wait and retry
+              setTimeout(() => {
+                callGraphAPI(accessToken, method, path, data, queryParams, customHeaders, retryCount + 1)
+                  .then(resolve)
+                  .catch(reject);
+              }, delay);
+              return;
+            }
+            
+            // Parse error and add suggestions
             try {
               const errorData = JSON.parse(responseData);
               const errorMessage = errorData.error?.message || responseData;
-              reject(new Error(`API call failed with status ${res.statusCode}: ${errorMessage}`));
+              const suggestion = ERROR_SUGGESTIONS[res.statusCode] || '';
+              const fullMessage = suggestion 
+                ? `API call failed with status ${res.statusCode}: ${errorMessage}\nSuggestion: ${suggestion}`
+                : `API call failed with status ${res.statusCode}: ${errorMessage}`;
+              reject(new Error(fullMessage));
             } catch (parseError) {
-              reject(new Error(`API call failed with status ${res.statusCode}: ${responseData}`));
+              const suggestion = ERROR_SUGGESTIONS[res.statusCode] || '';
+              const fullMessage = suggestion
+                ? `API call failed with status ${res.statusCode}: ${responseData}\nSuggestion: ${suggestion}`
+                : `API call failed with status ${res.statusCode}: ${responseData}`;
+              reject(new Error(fullMessage));
             }
           }
         });

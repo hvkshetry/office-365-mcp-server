@@ -1055,7 +1055,8 @@ async function batchMoveEmails(accessToken, params) {
       );
       
       batchResponse.responses.forEach((response, index) => {
-        if (response.status === 200) {
+        // Email move operations return 201 (Created) on success
+        if (response.status === 200 || response.status === 201) {
           results.push({ emailId: batch[index], status: 'success' });
         } else {
           results.push({ 
