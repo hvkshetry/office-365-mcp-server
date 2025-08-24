@@ -712,18 +712,23 @@ const filesTools = [
           // Transform SharePoint site name to local folder name
           // Examples:
           // "Intema-UASBInternals" -> "Intema - UASB Internals - Documents"
-          // "ProjectName-SubProject" -> "ProjectName - SubProject - Documents"
+          // "ChemfieldCellulosePvtLtd" -> "Chemfield Cellulose Pvt Ltd - Documents"
+          // "CBGMeerut" -> "CBG Meerut - Documents"
+          // "Proposals" -> "Proposals - Documents"
+          // "ProjectName-SubProject" -> "Project Name - Sub Project - Documents"
           
           // Replace hyphens with spaces and add proper formatting
           localSiteFolderName = siteName
             .replace(/([a-z])([A-Z])/g, '$1 $2') // Add space between camelCase
             .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2') // Add space between consecutive caps and following word
+            .replace(/(Pvt|Ltd|LLC|Inc|Corp)([A-Z])/g, '$1 $2') // Add space after common abbreviations
             .replace(/-/g, ' - ') // Replace hyphens with space-hyphen-space
             .replace(/\s+/g, ' ') // Clean up multiple spaces
             .trim();
           
-          // Add "- Documents" suffix if it's a project folder
-          if (!localSiteFolderName.endsWith('- Documents') && localSiteFolderName.includes(' - ')) {
+          // Add "- Documents" suffix to ALL project folders
+          // SharePoint sites sync locally with "- Documents" suffix
+          if (!localSiteFolderName.endsWith('- Documents') && !localSiteFolderName.endsWith('Documents')) {
             localSiteFolderName += ' - Documents';
           }
         }
