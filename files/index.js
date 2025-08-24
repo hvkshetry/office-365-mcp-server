@@ -438,6 +438,7 @@ async function searchFiles(accessToken, params) {
     const file = scope === 'me' ? item : item.resource;
     return `${index + 1}. ${file.name}
    Path: ${file.parentReference?.path || 'N/A'}
+   WebURL: ${file.webUrl || 'N/A'}
    Modified: ${new Date(file.lastModifiedDateTime).toLocaleString()}
    ID: ${file.id}`;
   }).join('\n\n');
@@ -638,6 +639,104 @@ const filesTools = [
       required: ["operation"]
     },
     handler: handleFiles
+  },
+  {
+    name: "files_map_sharepoint_path",
+    description: "Map SharePoint webUrl to local sync path",
+    inputSchema: {
+      type: "object",
+      properties: {
+        webUrl: { 
+          type: "string", 
+          description: "SharePoint web URL to map to local sync path" 
+        }
+      },
+      required: ["webUrl"]
+    },
+    handler: async (args) => {
+      const { webUrl } = args;
+      
+      if (!webUrl) {
+        return {
+          content: [{
+            type: "text",
+            text: "Error: webUrl is required"
+          }]
+        };
+      }
+      
+      // Base sync path
+      const baseSyncPath = "/mnt/c/Users/hvksh/Circle H2O LLC";
+      
+      try {
+        // Parse URL and extract path components
+        const url = new URL(webUrl);
+        const pathParts = decodeURIComponent(url.pathname).split('/').filter(p => p);
+        
+        // Find document library indicator
+        let docIndex = -1;
+        for (let i = 0; i < pathParts.length; i++) {
+          if (pathParts[i].includes('Documents') || pathParts[i] === 'Shared') {
+            docIndex = i;
+            break;
+          }
+        }
+        
+        // If no document indicator found, look for 'sites'
+        if (docIndex === -1) {
+          const sitesIndex = pathParts.findIndex(p => p === 'sites');
+          if (sitesIndex !== -1 && sitesIndex + 1 < pathParts.length) {
+            docIndex = sitesIndex + 2; // Skip 'sites' and site name
+          }
+        }
+        
+        if (docIndex === -1 || docIndex >= pathParts.length) {
+          return {
+            content: [{
+              type: "text",
+              text: `Unable to parse SharePoint path from URL: ${webUrl}`
+            }]
+          };
+        }
+        
+        // Extract file path components after document library
+        const fileParts = pathParts.slice(docIndex + 1);
+        
+        // Apply transformation rules for project folders
+        const transformedParts = fileParts.map((part, index) => {
+          // Add "- Documents" suffix to project folders (first level)
+          if (index === 0 && !part.endsWith('- Documents') && part.includes(' - ') && 
+              !part.match(/\.(xlsx|docx|pdf|pptx|txt)$/i)) {
+            return part + ' - Documents';
+          }
+          return part;
+        });
+        
+        // Construct the local path
+        const localPath = transformedParts.length > 0 
+          ? `${baseSyncPath}/${transformedParts.join('/')}`
+          : baseSyncPath;
+        
+        // Also provide symlink path for subagent use
+        const symlinkPath = transformedParts.length > 0
+          ? `/home/hvksh/admin/temp/sharepoint/${transformedParts.join('/')}`
+          : '/home/hvksh/admin/temp/sharepoint';
+        
+        return {
+          content: [{
+            type: "text",
+            text: `SharePoint URL mapped successfully:\n\nSharePoint: ${webUrl}\n\nLocal path (for main agent):\n${localPath}\n\nSymlink path (for subagent):\n${symlinkPath}`
+          }]
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: "text",
+            text: `Error mapping SharePoint URL: ${error.message}`
+          }]
+        };
+      }
+    }
   }
 ];
 

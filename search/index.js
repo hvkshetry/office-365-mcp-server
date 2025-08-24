@@ -465,6 +465,7 @@ function formatSearchResults(results) {
         case 'driveItem':
           formatted += `${index + 1}. ${resource.name}
    Path: ${resource.parentReference?.path || 'N/A'}
+   WebURL: ${resource.webUrl || 'N/A'}
    Modified: ${new Date(resource.lastModifiedDateTime).toLocaleString()}\n\n`;
           break;
           
