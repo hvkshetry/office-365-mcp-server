@@ -16,6 +16,8 @@ const { emailTools } = require('./email');
 const teamsTools = require('./teams');
 const { notificationTools } = require('./notifications');
 const { plannerTools } = require('./planner');
+const { filesTools } = require('./files');
+const { searchTools } = require('./search');
 // Future modules to be developed:
 // const { adminTools } = require('./admin');
 
@@ -30,7 +32,9 @@ const TOOLS = [
   ...emailTools,
   ...teamsTools,
   ...notificationTools,
-  ...plannerTools
+  ...plannerTools,
+  ...filesTools,
+  ...searchTools
   // Future modules will be added here:
   // ...adminTools
 ];

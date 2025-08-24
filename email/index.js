@@ -1328,6 +1328,308 @@ async function createEmailFolder(accessToken, params) {
   };
 }
 
+/**
+ * Get focused inbox messages
+ */
+async function getFocusedInbox(accessToken, params) {
+  const { maxResults = 25 } = params;
+  
+  const queryParams = {
+    $filter: 'inferenceClassification eq \'Focused\'',
+    $select: config.EMAIL_SELECT_FIELDS,
+    $orderby: 'receivedDateTime DESC',
+    $top: maxResults
+  };
+  
+  const response = await callGraphAPI(
+    accessToken,
+    'GET',
+    'me/messages',
+    null,
+    queryParams
+  );
+  
+  if (!response.value || response.value.length === 0) {
+    return {
+      content: [{ type: "text", text: "No focused messages found." }]
+    };
+  }
+  
+  const messagesList = response.value.map((msg, index) => {
+    return `${index + 1}. ${msg.subject}
+   From: ${msg.from?.emailAddress?.address || 'N/A'}
+   Date: ${new Date(msg.receivedDateTime).toLocaleString()}
+   Preview: ${msg.bodyPreview?.substring(0, 100)}...
+   Has Attachments: ${msg.hasAttachments ? 'Yes' : 'No'}
+   ID: ${msg.id}`;
+  }).join('\n\n');
+  
+  return {
+    content: [{ 
+      type: "text", 
+      text: `Found ${response.value.length} focused messages:\n\n${messagesList}` 
+    }]
+  };
+}
+
+/**
+ * Manage email categories
+ */
+async function handleEmailCategories(args) {
+  const { operation, ...params } = args;
+  
+  if (!operation) {
+    return {
+      content: [{ 
+        type: "text", 
+        text: "Missing required parameter: operation. Valid operations are: list, create, update, delete, apply, remove" 
+      }]
+    };
+  }
+  
+  try {
+    const accessToken = await ensureAuthenticated();
+    
+    switch (operation) {
+      case 'list':
+        return await listCategories(accessToken);
+      case 'create':
+        return await createCategory(accessToken, params);
+      case 'update':
+        return await updateCategory(accessToken, params);
+      case 'delete':
+        return await deleteCategory(accessToken, params);
+      case 'apply':
+        return await applyCategory(accessToken, params);
+      case 'remove':
+        return await removeCategory(accessToken, params);
+      default:
+        return {
+          content: [{ 
+            type: "text", 
+            text: `Invalid operation: ${operation}` 
+          }]
+        };
+    }
+  } catch (error) {
+    console.error(`Error in categories ${operation}:`, error);
+    return {
+      content: [{ type: "text", text: `Error: ${error.message}` }]
+    };
+  }
+}
+
+async function listCategories(accessToken) {
+  const response = await callGraphAPI(
+    accessToken,
+    'GET',
+    'me/outlook/masterCategories'
+  );
+  
+  if (!response.value || response.value.length === 0) {
+    return {
+      content: [{ type: "text", text: "No categories found." }]
+    };
+  }
+  
+  const categoriesList = response.value.map((cat, index) => {
+    return `${index + 1}. ${cat.displayName} (Color: ${cat.color})`;
+  }).join('\n');
+  
+  return {
+    content: [{ 
+      type: "text", 
+      text: `Categories:\n${categoriesList}` 
+    }]
+  };
+}
+
+async function createCategory(accessToken, params) {
+  const { displayName, color = 'preset0' } = params;
+  
+  if (!displayName) {
+    return {
+      content: [{ 
+        type: "text", 
+        text: "Missing required parameter: displayName" 
+      }]
+    };
+  }
+  
+  const response = await callGraphAPI(
+    accessToken,
+    'POST',
+    'me/outlook/masterCategories',
+    { displayName, color }
+  );
+  
+  return {
+    content: [{ 
+      type: "text", 
+      text: `Category '${displayName}' created with color ${color}` 
+    }]
+  };
+}
+
+async function applyCategory(accessToken, params) {
+  const { emailId, categories } = params;
+  
+  if (!emailId || !categories) {
+    return {
+      content: [{ 
+        type: "text", 
+        text: "Missing required parameters: emailId and categories" 
+      }]
+    };
+  }
+  
+  await callGraphAPI(
+    accessToken,
+    'PATCH',
+    `me/messages/${emailId}`,
+    { categories: Array.isArray(categories) ? categories : [categories] }
+  );
+  
+  return {
+    content: [{ type: "text", text: "Categories applied successfully!" }]
+  };
+}
+
+/**
+ * Get mail tips for recipients
+ */
+async function getMailTips(accessToken, params) {
+  const { recipients } = params;
+  
+  if (!recipients || recipients.length === 0) {
+    return {
+      content: [{ 
+        type: "text", 
+        text: "Missing required parameter: recipients" 
+      }]
+    };
+  }
+  
+  const body = {
+    EmailAddresses: recipients.map(email => ({ address: email })),
+    MailTipsOptions: 'automaticReplies, mailboxFullStatus, customMailTip, deliveryRestriction, moderationStatus'
+  };
+  
+  const response = await callGraphAPI(
+    accessToken,
+    'POST',
+    'me/getMailTips',
+    body
+  );
+  
+  const tips = response.value.map((tip, index) => {
+    let tipInfo = `${recipients[index]}:\n`;
+    
+    if (tip.automaticReplies?.message) {
+      tipInfo += `  - Auto-reply: ${tip.automaticReplies.message}\n`;
+    }
+    if (tip.mailboxFull) {
+      tipInfo += `  - Mailbox is full\n`;
+    }
+    if (tip.customMailTip) {
+      tipInfo += `  - Custom tip: ${tip.customMailTip}\n`;
+    }
+    if (tip.deliveryRestricted) {
+      tipInfo += `  - Delivery restricted\n`;
+    }
+    if (tip.isModerated) {
+      tipInfo += `  - Messages are moderated\n`;
+    }
+    
+    return tipInfo;
+  }).join('\n');
+  
+  return {
+    content: [{ 
+      type: "text", 
+      text: `Mail Tips:\n${tips}` 
+    }]
+  };
+}
+
+/**
+ * Handle email with mentions
+ */
+async function handleMentions(args) {
+  const { operation, ...params } = args;
+  
+  if (!operation) {
+    return {
+      content: [{ 
+        type: "text", 
+        text: "Missing required parameter: operation. Valid operations are: list, get" 
+      }]
+    };
+  }
+  
+  try {
+    const accessToken = await ensureAuthenticated();
+    
+    switch (operation) {
+      case 'list':
+        return await listMentions(accessToken, params);
+      case 'get':
+        return await getMentions(accessToken, params);
+      default:
+        return {
+          content: [{ 
+            type: "text", 
+            text: `Invalid operation: ${operation}` 
+          }]
+        };
+    }
+  } catch (error) {
+    console.error(`Error in mentions ${operation}:`, error);
+    return {
+      content: [{ type: "text", text: `Error: ${error.message}` }]
+    };
+  }
+}
+
+async function listMentions(accessToken, params) {
+  const { maxResults = 25 } = params;
+  
+  const queryParams = {
+    $filter: 'mentionsPreview/isMentioned eq true',
+    $select: 'id,subject,from,receivedDateTime,bodyPreview,mentionsPreview',
+    $orderby: 'receivedDateTime DESC',
+    $top: maxResults
+  };
+  
+  const response = await callGraphAPI(
+    accessToken,
+    'GET',
+    'me/messages',
+    null,
+    queryParams
+  );
+  
+  if (!response.value || response.value.length === 0) {
+    return {
+      content: [{ type: "text", text: "No messages with mentions found." }]
+    };
+  }
+  
+  const messagesList = response.value.map((msg, index) => {
+    return `${index + 1}. ${msg.subject}
+   From: ${msg.from?.emailAddress?.address || 'N/A'}
+   Date: ${new Date(msg.receivedDateTime).toLocaleString()}
+   ID: ${msg.id}`;
+  }).join('\n\n');
+  
+  return {
+    content: [{ 
+      type: "text", 
+      text: `Found ${response.value.length} messages with mentions:\n\n${messagesList}` 
+    }]
+  };
+}
+
 // Export consolidated tools
 const emailTools = [
   {
@@ -1515,6 +1817,53 @@ const emailTools = [
     },
     handler: handleEmailRules
   }
+,
+  {
+    name: "email_focused",
+    description: "Get focused inbox messages (important messages filtered by AI)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        maxResults: { type: "number", description: "Maximum number of results (default: 25)" }
+      }
+    },
+    handler: async (args) => {
+      const accessToken = await ensureAuthenticated();
+      return await getFocusedInbox(accessToken, args);
+    }
+  },
+  {
+    name: "email_categories",
+    description: "Manage email categories: list, create, update, delete, apply, or remove",
+    inputSchema: {
+      type: "object",
+      properties: {
+        operation: { 
+          type: "string", 
+          enum: ["list", "create", "update", "delete", "apply", "remove"],
+          description: "The operation to perform" 
+        },
+        // Create/Update parameters
+        displayName: { type: "string", description: "Category display name" },
+        color: { 
+          type: "string",
+          description: "Category color (preset0-preset24)" 
+        },
+        // Apply/Remove parameters
+        emailId: { type: "string", description: "Email ID to apply/remove category" },
+        categories: { 
+          type: "array",
+          items: { type: "string" },
+          description: "Categories to apply/remove" 
+        },
+        // Update/Delete parameters
+        categoryId: { type: "string", description: "Category ID for update/delete" }
+      },
+      required: ["operation"]
+    },
+    handler: handleEmailCategories
+  }
+  // Removed email_mailtips and email_mentions - not functional with current permissions/setup
 ];
 
 module.exports = { emailTools };
