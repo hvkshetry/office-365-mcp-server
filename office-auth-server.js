@@ -10,7 +10,7 @@ require('dotenv').config();
 // This server handles the OAuth2 redirect callback from Microsoft
 
 const app = express();
-const PORT = process.env.PORT || 3333;
+const PORT = process.env.PORT || 3000;
 const TOKEN_FILE = path.join(os.homedir(), '.office-mcp-tokens.json');
 
 // Store auth codes temporarily in memory
@@ -325,7 +325,7 @@ function exchangeCodeForTokens(code) {
 }
 
 // Start the server
-app.listen(PORT, () => {
+app.listen(PORT, '127.0.0.1', () => {
   console.log(`Office MCP Authentication Server running on http://localhost:${PORT}`);
   console.log(`Redirect URI: http://localhost:${PORT}/auth/callback`);
   console.log('');

@@ -9,7 +9,7 @@
         "OFFICE_CLIENT_ID": "your-azure-app-client-id",
         "OFFICE_CLIENT_SECRET": "your-azure-app-client-secret",
         "OFFICE_TENANT_ID": "common",
-        "OFFICE_REDIRECT_URI": "http://localhost:3333/auth/callback"
+        "OFFICE_REDIRECT_URI": "http://localhost:3000/auth/callback"
       }
     }
   }

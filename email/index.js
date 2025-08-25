@@ -30,7 +30,7 @@ function convertSharePointUrlToLocal(sharePointUrl) {
         const personalIndex = pathParts.indexOf('personal');
         if (personalIndex !== -1 && pathParts.length > personalIndex + 2) {
           const remainingPath = pathParts.slice(personalIndex + 2).join('/');
-          return `/mnt/c/Users/hvksh/OneDrive - Circle H2O LLC/${decodeURIComponent(remainingPath)}`;
+          return `${config.ONEDRIVE_SYNC_PATH}/${decodeURIComponent(remainingPath)}`;
         }
       }
       return null;
@@ -53,8 +53,8 @@ function convertSharePointUrlToLocal(sharePointUrl) {
     const docPath = pathParts.slice(docsIndex + 1).join('/');
     
     // Construct local path
-    // Pattern: /mnt/c/Users/hvksh/Circle H2O LLC/[Site] - Documents/[remaining path]
-    const localPath = `/mnt/c/Users/hvksh/Circle H2O LLC/${siteName} - Documents/${decodeURIComponent(docPath)}`;
+    // Pattern: [SHAREPOINT_SYNC_PATH]/[Site] - Documents/[remaining path]
+    const localPath = `${config.SHAREPOINT_SYNC_PATH}/${siteName} - Documents/${decodeURIComponent(docPath)}`;
     
     return localPath;
   } catch (err) {
@@ -72,7 +72,7 @@ function convertSharePointUrlToLocal(sharePointUrl) {
  */
 async function downloadEmbeddedAttachment(attachment, emailId, accessToken) {
   try {
-    const tempDir = '/home/hvksh/admin/temp/email-attachments';
+    const tempDir = config.TEMP_ATTACHMENTS_PATH;
     
     // Ensure directory exists
     if (!fs.existsSync(tempDir)) {
@@ -122,7 +122,7 @@ async function downloadEmbeddedAttachment(attachment, emailId, accessToken) {
  * Clean up old attachment files (older than 24 hours)
  */
 function cleanupOldAttachments() {
-  const tempDir = '/home/hvksh/admin/temp/email-attachments';
+  const tempDir = config.TEMP_ATTACHMENTS_PATH;
   const maxAge = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
   
   if (!fs.existsSync(tempDir)) return;

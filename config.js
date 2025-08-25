@@ -12,6 +12,12 @@ module.exports = {
   SERVER_NAME: "office-mcp",
   SERVER_VERSION: "1.0.0",
   
+  // Transport configuration
+  TRANSPORT_TYPE: process.env.TRANSPORT_TYPE || 'stdio', // 'stdio' or 'http'
+  HTTP_PORT: process.env.HTTP_PORT || 3333,
+  HTTP_HOST: process.env.HTTP_HOST || '127.0.0.1',
+  SERVICE_MODE: process.env.SERVICE_MODE === 'true',
+  
   // Test mode setting
   USE_TEST_MODE: process.env.USE_TEST_MODE === 'true',
   
@@ -19,7 +25,7 @@ module.exports = {
   AUTH_CONFIG: {
     clientId: process.env.OFFICE_CLIENT_ID || '',
     clientSecret: process.env.OFFICE_CLIENT_SECRET || '',
-    redirectUri: 'http://localhost:3333/auth/callback',
+    redirectUri: 'http://localhost:3000/auth/callback',
     scopes: [
       'Mail.Read', 'Mail.ReadWrite', 'Mail.Send', 'MailboxSettings.ReadWrite', 
       'User.Read', 'User.ReadWrite',
@@ -33,7 +39,7 @@ module.exports = {
       'Tasks.Read', 'Tasks.ReadWrite'
     ],
     tokenStorePath: path.join(homeDir, '.office-mcp-tokens.json'),
-    authServerUrl: 'http://localhost:3333'
+    authServerUrl: 'http://localhost:3000'
   },
   
   // Microsoft Graph API
@@ -56,5 +62,11 @@ module.exports = {
   
   // Pagination
   DEFAULT_PAGE_SIZE: 25,
-  MAX_RESULT_COUNT: 50
+  MAX_RESULT_COUNT: 50,
+  
+  // Local file paths
+  SHAREPOINT_SYNC_PATH: process.env.SHAREPOINT_SYNC_PATH || path.join(homeDir, 'SharePoint'),
+  ONEDRIVE_SYNC_PATH: process.env.ONEDRIVE_SYNC_PATH || path.join(homeDir, 'OneDrive'),
+  TEMP_ATTACHMENTS_PATH: process.env.TEMP_ATTACHMENTS_PATH || path.join(homeDir, 'temp', 'email-attachments'),
+  SHAREPOINT_SYMLINK_PATH: process.env.SHAREPOINT_SYMLINK_PATH || path.join(homeDir, 'temp', 'sharepoint')
 };

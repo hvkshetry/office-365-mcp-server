@@ -31,7 +31,15 @@
     "email",
     "calendar"
   ],
-  "author": "",
+  "author": "Office MCP Contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/office-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/office-mcp/issues"
+  },
+  "homepage": "https://github.com/yourusername/office-mcp#readme",
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.1.0",
@@ -44,6 +52,6 @@
     "jest": "^29.7.0"
   },
   "engines": {
-    "node": ">=14.0.0"
+    "node": ">=16.0.0"
   }
 }

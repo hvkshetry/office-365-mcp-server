@@ -4,86 +4,88 @@ This is a comprehensive implementation of the Office MCP (Model Context Protocol
 
 > **🚀 Headless Operation!** Run without browser authentication after initial setup. Automatic token refresh and Windows Task Scheduler support for invisible background operation. See [TASK_SCHEDULER_SETUP.md](TASK_SCHEDULER_SETUP.md) for Windows setup guide.
 
-## Full Tool Documentation
-For detailed documentation of all available tools and usage examples, see [TOOLS_DOCUMENTATION.md](./TOOLS_DOCUMENTATION.md)
-
-## Directory Structure
-
-```
-/office-mcp/
-├── index.js                 # Main entry point
-├── config.js                # Configuration settings
-├── auth/                    # Authentication modules
-│   ├── index.js             # Authentication exports
-│   ├── token-manager.js     # Token storage and refresh
-│   └── tools.js             # Auth-related tools
-├── calendar/                # Calendar functionality
-│   ├── index.js             # Calendar exports
-│   ├── list.js              # List events
-│   ├── create.js            # Create event
-│   ├── update.js            # Update event
-│   └── ...                  # Other calendar operations
-├── email/                   # Email functionality
-│   ├── index.js             # Email exports
-│   ├── list.js              # List emails
-│   ├── search.js            # Search emails
-│   ├── read.js              # Read email
-│   └── send.js              # Send email
-├── folder/                  # Email folder functionality
-│   ├── index.js             # Folder exports
-│   ├── list.js              # List folders
-│   └── ...                  # Other folder operations
-├── rules/                   # Email rules functionality
-│   ├── index.js             # Rules exports
-│   ├── list.js              # List rules
-│   └── ...                  # Other rules operations
-├── teams/                   # Teams functionality
-│   ├── index.js             # Teams exports
-│   ├── list.js              # List teams
-│   ├── channels.js          # Channel operations
-│   ├── chats.js             # Chat operations
-│   ├── meetings.js          # Meeting operations
-│   ├── insights.js          # AI insights and recording operations
-│   └── transcripts.js       # Transcript operations
-├── drive/                   # OneDrive/SharePoint functionality
-│   ├── index.js             # Drive exports
-│   ├── list.js              # List files/folders
-│   ├── content.js           # File content operations
-│   ├── upload.js            # File upload and folder operations
-│   └── recyclebin.js        # Recycle bin management
-├── planner/                 # Planner/Tasks functionality
-│   ├── index.js             # Planner exports
-│   ├── plans.js             # Plan operations
-│   ├── tasks.js             # Task operations
-│   └── buckets.js           # Bucket operations
-├── users/                   # User management functionality
-│   ├── index.js             # User exports
-│   ├── profile.js           # User profile operations
-│   ├── directory.js         # Directory search operations
-│   └── presence.js          # Presence status operations
-├── notifications/           # Change notifications functionality
-│   ├── index.js             # Notifications exports
-│   ├── subscribe.js         # Create subscriptions
-│   └── manage.js            # Manage subscriptions
-└── utils/                   # Utility functions
-    ├── graph-api.js         # Microsoft Graph API helper
-    ├── odata-helpers.js     # OData query building
-    └── mock-data.js         # Test mode data
-```
-
 ## Features
 
-- **Authentication**: OAuth 2.0 authentication with Microsoft Graph API
-- **Email Management**: List, search, read, and send emails
-- **Calendar Management**: Create, read, update, and delete calendar events
-- **Teams Integration**: Access Teams chats, channels, meetings, transcripts, and AI insights
-- **OneDrive/SharePoint Access**: File and folder management, upload/download, recycle bin
-- **Planner/Tasks**: Plan, task, and bucket management capabilities
-- **User Management**: Profile access, presence status, directory search
-- **Change Notifications**: Subscribe to resource changes via webhooks
-- **Modular Structure**: Clean separation of concerns for better maintainability
-- **OData Filter Handling**: Proper escaping and formatting of OData queries
-- **Test Mode**: Simulated responses for testing without real API calls
+- **Complete Microsoft 365 Integration**: Email, Calendar, Teams, OneDrive/SharePoint, and Planner
+- **Headless Operation**: Run without browser after initial authentication
+- **Automatic Token Management**: Persistent token storage with automatic refresh
+- **Email Attachment Handling**: Download embedded attachments and map SharePoint URLs to local paths
+- **Advanced Email Search**: Unified search with KQL support and automatic query optimization
+- **Teams Meeting Management**: Access transcripts, recordings, and AI insights
+- **File Management**: Full OneDrive and SharePoint file operations
+- **Task Management**: Complete Microsoft Planner integration
+- **Configurable Paths**: Environment variables for all local sync paths
+
+## Quick Start
+
+### Prerequisites
+- Node.js 16 or higher
+- Microsoft 365 account (personal or work/school)
+- Azure App Registration (see below)
+
+### Installation
+
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/office-mcp.git
+cd office-mcp
+```
+
+2. Install dependencies:
+```bash
+npm install
+```
+
+3. Copy the environment template:
+```bash
+cp .env.example .env
+```
+
+4. Configure your `.env` file with:
+   - Azure App credentials (see Azure Setup below)
+   - Local file paths for SharePoint/OneDrive sync
+   - Optional settings
+
+5. Run initial authentication:
+```bash
+npm run auth-server
+# Visit http://localhost:3000/auth and sign in
+```
+
+6. Configure Claude Desktop (see Claude Desktop Configuration below)
+
+## Core Capabilities
+
+### Email Operations
+- **Unified Search**: Single `email_search` tool with automatic optimization
+- **Attachment Handling**: Download embedded attachments, map SharePoint URLs to local paths
+- **Advanced Features**: Categories, rules, focused inbox, folder management
+- **Batch Operations**: Move multiple emails efficiently
+
+### Calendar Management
+- **Full CRUD Operations**: Create, read, update, delete events
+- **Teams Integration**: Create meetings with Teams links
+- **Recurrence Support**: Complex recurring event patterns
+- **UTC Time Handling**: Proper timezone management
+
+### Teams Features
+- **Meeting Management**: Create, update, cancel meetings
+- **Transcript Access**: Retrieve meeting transcripts
+- **Recording Access**: Access meeting recordings
+- **Channel Operations**: Messages, members, tabs
+- **Chat Management**: Create, send, manage chat messages
+
+### File Management
+- **SharePoint Integration**: Local sync path mapping
+- **OneDrive Support**: Full file operations
+- **Batch Operations**: Upload/download multiple files
+- **Search**: Content and metadata search
+
+### Task Management (Planner)
+- **Plan Operations**: Create and manage plans
+- **Task Assignment**: User lookup and assignment
+- **Bucket Organization**: Group tasks efficiently
+- **Bulk Operations**: Update/delete multiple tasks
 
 ## Azure App Registration & Configuration
 
@@ -146,32 +148,76 @@ To use this MCP server you need to first register and configure an app in Azure 
 6. Click on "Add"
 7. Copy the secret value and enter it as the OFFICE_CLIENT_SECRET in the .env file as well as in the claude-config-sample.json file
 
-## Configuration
+## Environment Configuration
 
-To configure the server, edit the `config.js` file to change:
-
-- Server name and version
-- Test mode settings
-- Authentication parameters
-- Field selections for various services
-- API endpoints
-
-## Usage with Claude Desktop
-
-1. Copy the sample configuration from `claude-config-sample.json` to your Claude Desktop configuration
-2. Restart Claude Desktop
-3. Authenticate with Microsoft using the `authenticate` tool
-4. Use the available tools to interact with Microsoft 365 services
-
-## Running Standalone
-
-You can test the server using:
-
+### Required Variables
 ```bash
-./test-modular-server.sh
+# Azure App Registration
+OFFICE_CLIENT_ID=your-azure-app-client-id
+OFFICE_CLIENT_SECRET=your-azure-app-client-secret
+OFFICE_TENANT_ID=common
+
+# Authentication
+OFFICE_REDIRECT_URI=http://localhost:3000/auth/callback
 ```
 
-This will use the MCP Inspector to directly connect to the server and let you test the available tools.
+### Optional Variables
+```bash
+# Local file paths (customize to your system)
+SHAREPOINT_SYNC_PATH=/path/to/your/sharepoint/sync
+ONEDRIVE_SYNC_PATH=/path/to/your/onedrive/sync
+TEMP_ATTACHMENTS_PATH=/path/to/temp/attachments
+SHAREPOINT_SYMLINK_PATH=/path/to/sharepoint/symlink
+
+# Server settings
+USE_TEST_MODE=false
+TRANSPORT_TYPE=stdio  # or 'http' for headless
+HTTP_PORT=3333
+HTTP_HOST=127.0.0.1
+```
+
+## Claude Desktop Configuration
+
+1. Locate your Claude Desktop configuration file:
+   - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+   - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+   - Linux: `~/.config/Claude/claude_desktop_config.json`
+
+2. Add the MCP server configuration:
+```json
+{
+  "mcpServers": {
+    "office-mcp": {
+      "command": "node",
+      "args": ["/path/to/office-mcp/index.js"],
+      "env": {
+        "OFFICE_CLIENT_ID": "your-client-id",
+        "OFFICE_CLIENT_SECRET": "your-client-secret",
+        "SHAREPOINT_SYNC_PATH": "/path/to/sharepoint",
+        "ONEDRIVE_SYNC_PATH": "/path/to/onedrive"
+      }
+    }
+  }
+}
+```
+
+3. Restart Claude Desktop
+
+4. In Claude, use the `authenticate` tool to connect to Microsoft 365
+
+## Testing
+
+### MCP Inspector
+Test the server directly using the MCP Inspector:
+```bash
+npx @modelcontextprotocol/inspector node index.js
+```
+
+### Test Mode
+Enable test mode to use mock data without API calls:
+```bash
+USE_TEST_MODE=true node index.js
+```
 
 ## Authentication Flow
 
@@ -183,47 +229,60 @@ This will use the MCP Inspector to directly connect to the server and let you te
 4. Complete the authentication in your browser
 5. Tokens are stored in `~/.office-mcp-tokens.json`
 
-### Quick Start
+## Headless Operation
 
-#### Windows - Automatic Background Operation
+### Automatic Token Refresh
+After initial authentication, the server automatically refreshes tokens without user interaction.
 
-For completely headless operation on Windows:
-
-1. **One-time setup** - Complete initial authentication:
-   ```bash
-   npm run auth-server
-   # Visit http://localhost:3000/auth and sign in
-   ```
-
-2. **Install as scheduled task** (run as Administrator):
-   ```powershell
-   npm run setup:windows
-   ```
-
-The server will now start automatically with Windows and run invisibly in the background. See [TASK_SCHEDULER_SETUP.md](TASK_SCHEDULER_SETUP.md) for details.
-
-#### Manual Operation
-
-For manual testing or debugging:
+### HTTP Transport Mode
+For headless environments, use HTTP transport:
 ```bash
-# Windows
-run-office-mcp.bat
-
-# Unix/Linux/macOS
-./run-office-mcp.sh
+TRANSPORT_TYPE=http HTTP_PORT=3333 node index.js
 ```
+
+### Windows Service (Optional)
+For Windows background operation:
+1. Complete initial authentication
+2. Configure as Windows Task Scheduler task
+3. Runs invisibly at system startup
 
 ## Troubleshooting
 
-- **Authentication Issues**: Check the token file and authentication server logs
-- **OData Filter Errors**: Look for escape sequences in the server logs
-- **API Call Failures**: Check for detailed error messages in the response
+### Common Issues
 
-## Extending the Server
+1. **Authentication Errors**
+   - Ensure Azure App has correct permissions
+   - Check token file exists: `~/.office-mcp-tokens.json`
+   - Verify redirect URI matches Azure configuration
 
-To add more functionality:
+2. **Email Attachment Issues**
+   - Configure local sync paths in `.env`
+   - Ensure temp directory has write permissions
+   - Check SharePoint sync is active
 
-1. Create new module directories (e.g., `teams/`)
-2. Implement tool handlers in separate files
-3. Export tool definitions from module index files
-4. Import and add tools to `TOOLS` array in `index.js`
+3. **API Rate Limits**
+   - Server includes automatic retry with exponential backoff
+   - Reduce request frequency if persistent
+
+4. **Permission Errors**
+   - Verify all required Graph API permissions are granted
+   - Admin consent may be required for some permissions
+
+## Security Considerations
+
+- **Token Storage**: Tokens are encrypted and stored locally
+- **Environment Variables**: Never commit `.env` files
+- **Client Secrets**: Rotate regularly and use Azure Key Vault in production
+- **Local Paths**: Use environment variables instead of hardcoding paths
+- **Audit Logging**: All API calls are logged for security monitoring
+
+## Contributing
+
+Contributions are welcome! Please:
+1. Fork the repository
+2. Create a feature branch
+3. Submit a pull request
+
+## License
+
+MIT License - See LICENSE file for details

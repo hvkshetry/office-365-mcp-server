@@ -666,7 +666,7 @@ const filesTools = [
       }
       
       // Base sync path
-      const baseSyncPath = "/mnt/c/Users/hvksh/Circle H2O LLC";
+      const baseSyncPath = config.SHAREPOINT_SYNC_PATH;
       
       try {
         // Parse URL and extract path components
@@ -751,8 +751,8 @@ const filesTools = [
         
         // Also provide symlink path for subagent use
         const symlinkPath = pathComponents.length > 0
-          ? `/home/hvksh/admin/temp/sharepoint/${pathComponents.join('/')}`
-          : '/home/hvksh/admin/temp/sharepoint';
+          ? `${config.SHAREPOINT_SYMLINK_PATH}/${pathComponents.join('/')}`
+          : config.SHAREPOINT_SYMLINK_PATH;
         
         return {
           content: [{

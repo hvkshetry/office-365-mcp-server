@@ -29,7 +29,7 @@ echo =========================================
 echo Both servers are now running!
 echo =========================================
 echo.
-echo Authentication Server: http://localhost:3333
+echo Authentication Server: http://localhost:3000
 echo.
 echo To use with Claude Desktop:
 echo 1. Make sure you've configured your .env file

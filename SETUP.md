@@ -1,12 +1,13 @@
 # Office MCP Server Setup Guide
 
-This guide will walk you through setting up the Office MCP Server with Claude Desktop.
+Complete setup guide for the Office MCP Server - a Model Context Protocol server that integrates Claude with Microsoft 365 services.
 
 ## Prerequisites
 
-- Node.js installed on your system
-- A Microsoft account (personal or work/school)
-- Access to Azure Portal for app registration
+- Node.js 16.0 or higher
+- Microsoft 365 account (personal or work/school)
+- Azure Portal access for app registration
+- Claude Desktop application
 
 ## Step 1: Azure App Registration
 
@@ -16,14 +17,25 @@ This guide will walk you through setting up the Office MCP Server with Claude De
 4. Configure your app:
    - Name: `Office MCP Server`
    - Supported account types: "Accounts in any organizational directory and personal Microsoft accounts"
-   - Redirect URI: Select "Web" and enter `http://localhost:3333/auth/callback`
+   - Redirect URI: Select "Web" and enter `http://localhost:3000/auth/callback`
 5. Click "Register"
 
 ## Step 2: Configure App Permissions
 
 1. In your app registration, go to "API permissions"
 2. Click "Add a permission" > "Microsoft Graph" > "Delegated permissions"
-3. Add all the permissions listed in the README.md file
+3. Add these required permissions:
+   - `offline_access`
+   - `User.Read`, `User.ReadWrite`
+   - `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`
+   - `Calendars.Read`, `Calendars.ReadWrite`
+   - `Files.Read`, `Files.ReadWrite`, `Files.ReadWrite.All`
+   - `Team.ReadBasic.All`, `Team.Create`
+   - `Chat.Read`, `Chat.ReadWrite`
+   - `ChannelMessage.Read.All`, `ChannelMessage.Send`
+   - `OnlineMeetingTranscript.Read.All`, `OnlineMeetings.ReadWrite`
+   - `Tasks.Read`, `Tasks.ReadWrite`
+   - `Group.Read.All`, `Directory.Read.All`
 4. Click "Grant admin consent" if you have admin privileges
 
 ## Step 3: Create Client Secret
@@ -35,24 +47,33 @@ This guide will walk you through setting up the Office MCP Server with Claude De
 
 ## Step 4: Configure the MCP Server
 
-### Option 1: Using Environment Variables
+### Environment Configuration
 
-1. Copy `.env.example` to `.env`:
+1. Copy the environment template:
    ```bash
    cp .env.example .env
    ```
 
-2. Edit `.env` with your values:
-   ```
+2. Edit `.env` with your Azure app credentials:
+   ```bash
+   # Required - Azure App Registration
    OFFICE_CLIENT_ID=your-application-client-id
    OFFICE_CLIENT_SECRET=your-client-secret
    OFFICE_TENANT_ID=common
-   OFFICE_REDIRECT_URI=http://localhost:3333/auth/callback
+   OFFICE_REDIRECT_URI=http://localhost:3000/auth/callback
+   
+   # Optional - Local file paths (customize to your system)
+   SHAREPOINT_SYNC_PATH=/path/to/sharepoint/sync
+   ONEDRIVE_SYNC_PATH=/path/to/onedrive/sync
+   TEMP_ATTACHMENTS_PATH=/path/to/temp/attachments
    ```
 
-### Option 2: Using Claude Desktop Configuration
+### Claude Desktop Configuration
 
-1. Copy the configuration from `claude_desktop_config.json`
+1. Open the example configuration:
+   ```bash
+   cat claude_desktop_config.example.json
+   ```
 
 2. Add it to your Claude Desktop configuration file:
    - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
@@ -77,7 +98,9 @@ Example configuration:
         "OFFICE_CLIENT_ID": "12345678-1234-1234-1234-123456789012",
         "OFFICE_CLIENT_SECRET": "your-secret-here",
         "OFFICE_TENANT_ID": "common",
-        "OFFICE_REDIRECT_URI": "http://localhost:3333/auth/callback"
+        "OFFICE_REDIRECT_URI": "http://localhost:3000/auth/callback",
+        "SHAREPOINT_SYNC_PATH": "/path/to/sharepoint",
+        "ONEDRIVE_SYNC_PATH": "/path/to/onedrive"
       }
     }
   }
@@ -91,13 +114,40 @@ cd office-mcp
 npm install
 ```
 
-## Step 6: Start the Authentication Server
+## Step 6: Initial Authentication
 
-The Office MCP server requires an authentication server to handle OAuth callbacks:
+Complete the one-time authentication setup:
 
-### Windows:
+### Start the Authentication Server
 ```bash
-# Start both servers automatically
+# Using npm script
+npm run auth-server
+
+# Or directly
+node office-auth-server.js
+```
+
+### Complete Authentication
+1. Open browser to: `http://localhost:3000/auth`
+2. Sign in with your Microsoft account
+3. Grant the requested permissions
+4. You should see "Authentication successful!"
+
+Tokens are saved to `~/.office-mcp-tokens.json` and will auto-refresh.
+
+## Step 7: Restart Claude Desktop
+
+1. Completely quit Claude Desktop
+2. Start Claude Desktop again
+3. The Office MCP server should now be available
+
+## Step 8: Verify Setup
+
+In Claude, test the connection:
+```
+1. Type: "Check Office MCP auth status"
+2. Claude should use the `check-auth-status` tool
+3. You should see authentication confirmed
 run-office-mcp.bat
 
 # Or start just the auth server
@@ -110,7 +160,7 @@ start-auth-server.bat
 ./start-auth-server.sh
 ```
 
-The authentication server will run on `http://localhost:3333`
+The authentication server will run on `http://localhost:3000`
 
 ## Step 7: Test the Server
 
@@ -143,7 +193,7 @@ After updating the configuration, restart Claude Desktop for the changes to take
 ## Troubleshooting
 
 ### Authentication Issues
-- Check that your redirect URI matches exactly: `http://localhost:3333/auth/callback`
+- Check that your redirect URI matches exactly: `http://localhost:3000/auth/callback`
 - Ensure your client secret is correct and not expired
 - Verify all required permissions are granted
 

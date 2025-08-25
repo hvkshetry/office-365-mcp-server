@@ -5,6 +5,12 @@
  * A Model Context Protocol server that provides access to
  * Microsoft 365 services through the Microsoft Graph API.
  */
+
+// Load environment variables from .env file
+// Use absolute path to ensure it loads regardless of working directory
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
+
 const { Server } = require("@modelcontextprotocol/sdk/server/index.js");
 const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio.js");
 const config = require('./config');
@@ -24,6 +30,9 @@ const { searchTools } = require('./search');
 // Log startup information
 console.error(`STARTING ${config.SERVER_NAME.toUpperCase()} MCP SERVER`);
 console.error(`Test mode is ${config.USE_TEST_MODE ? 'enabled' : 'disabled'}`);
+console.error(`Client ID: ${config.AUTH_CONFIG.clientId ? config.AUTH_CONFIG.clientId.substring(0, 8) + '...' : 'NOT SET'}`);
+console.error(`Token path: ${config.AUTH_CONFIG.tokenStorePath}`);
+console.error(`Token exists: ${require('fs').existsSync(config.AUTH_CONFIG.tokenStorePath)}`);
 
 // Combine all tools
 const TOOLS = [

@@ -50,7 +50,8 @@ function loadTokenCache() {
         return null;
       }
       
-      // Check token expiration
+      // Check token expiration - but DON'T return null here!
+      // We need to return the tokens so the refresh logic can run
       const now = Date.now();
       const expiresAt = tokens.expires_at || 0;
       
@@ -58,8 +59,8 @@ function loadTokenCache() {
       console.error(`[DEBUG] Token expires at: ${expiresAt}`);
       
       if (now > expiresAt) {
-        console.error('[DEBUG] Token has expired');
-        return null;
+        console.error('[DEBUG] Token has expired - will need refresh');
+        // Still return the tokens so refresh can happen
       }
       
       // Update the cache

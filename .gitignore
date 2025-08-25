@@ -52,6 +52,7 @@ test_tools.js
 # Backup files
 *.bak
 *.backup
+*.backup.*
 
 # Azure/Office 365 specific
 .azure/
