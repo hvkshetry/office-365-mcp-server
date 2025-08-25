@@ -6,6 +6,145 @@
 const { ensureAuthenticated } = require('../auth');
 const { callGraphAPI } = require('../utils/graph-api');
 const config = require('../config');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
+/**
+ * Helper function to convert SharePoint URLs to local sync paths
+ * @param {string} sharePointUrl - The SharePoint URL to convert
+ * @returns {string|null} - The local path or null if unable to map
+ */
+function convertSharePointUrlToLocal(sharePointUrl) {
+  try {
+    // Parse the SharePoint URL
+    const url = new URL(sharePointUrl);
+    const pathParts = url.pathname.split('/');
+    
+    // Look for sites index
+    const sitesIndex = pathParts.indexOf('sites');
+    if (sitesIndex === -1) {
+      // Check for personal OneDrive format
+      if (url.hostname.includes('-my.sharepoint.com')) {
+        // Personal OneDrive format: https://circleh2o-my.sharepoint.com/personal/user_domain/...
+        const personalIndex = pathParts.indexOf('personal');
+        if (personalIndex !== -1 && pathParts.length > personalIndex + 2) {
+          const remainingPath = pathParts.slice(personalIndex + 2).join('/');
+          return `/mnt/c/Users/hvksh/OneDrive - Circle H2O LLC/${decodeURIComponent(remainingPath)}`;
+        }
+      }
+      return null;
+    }
+    
+    // Get site name (e.g., "Proposals")
+    const siteName = pathParts[sitesIndex + 1];
+    
+    // Find "Shared Documents" or "Documents" index
+    let docsIndex = pathParts.indexOf('Shared Documents');
+    if (docsIndex === -1) {
+      docsIndex = pathParts.indexOf('Documents');
+    }
+    
+    if (docsIndex === -1) {
+      return null;
+    }
+    
+    // Get remaining path after documents folder
+    const docPath = pathParts.slice(docsIndex + 1).join('/');
+    
+    // Construct local path
+    // Pattern: /mnt/c/Users/hvksh/Circle H2O LLC/[Site] - Documents/[remaining path]
+    const localPath = `/mnt/c/Users/hvksh/Circle H2O LLC/${siteName} - Documents/${decodeURIComponent(docPath)}`;
+    
+    return localPath;
+  } catch (err) {
+    console.error('Error parsing SharePoint URL:', err);
+    return null;
+  }
+}
+
+/**
+ * Download and save embedded attachment to local temp directory
+ * @param {object} attachment - The attachment object from Graph API
+ * @param {string} emailId - The email ID for API calls
+ * @param {string} accessToken - Auth token for Graph API
+ * @returns {string|null} - Local file path or null on error
+ */
+async function downloadEmbeddedAttachment(attachment, emailId, accessToken) {
+  try {
+    const tempDir = '/home/hvksh/admin/temp/email-attachments';
+    
+    // Ensure directory exists
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
+    }
+    
+    // Generate unique filename to avoid conflicts
+    const timestamp = Date.now();
+    const hash = crypto.createHash('md5').update(attachment.id).digest('hex').substring(0, 8);
+    const sanitizedName = attachment.name.replace(/[^a-zA-Z0-9.-]/g, '_');
+    const fileName = `${timestamp}_${hash}_${sanitizedName}`;
+    const filePath = path.join(tempDir, fileName);
+    
+    let fileData;
+    
+    // Check if contentBytes is available (small files < 3MB)
+    if (attachment.contentBytes) {
+      // Use existing base64 data
+      fileData = Buffer.from(attachment.contentBytes, 'base64');
+    } else {
+      // Large file - fetch using /$value endpoint
+      const binaryData = await callGraphAPI(
+        accessToken,
+        'GET',
+        `me/messages/${emailId}/attachments/${attachment.id}/$value`,
+        null,
+        {}
+      );
+      
+      // callGraphAPI returns raw data for non-JSON responses
+      fileData = Buffer.from(binaryData, 'binary');
+    }
+    
+    // Save to file
+    fs.writeFileSync(filePath, fileData);
+    
+    console.error(`Attachment saved to: ${filePath}`);
+    return filePath;
+    
+  } catch (err) {
+    console.error('Error downloading attachment:', err);
+    return null;
+  }
+}
+
+/**
+ * Clean up old attachment files (older than 24 hours)
+ */
+function cleanupOldAttachments() {
+  const tempDir = '/home/hvksh/admin/temp/email-attachments';
+  const maxAge = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+  
+  if (!fs.existsSync(tempDir)) return;
+  
+  const files = fs.readdirSync(tempDir);
+  const now = Date.now();
+  
+  files.forEach(file => {
+    const filePath = path.join(tempDir, file);
+    const stats = fs.statSync(filePath);
+    const age = now - stats.mtimeMs;
+    
+    if (age > maxAge) {
+      try {
+        fs.unlinkSync(filePath);
+        console.error(`Cleaned up old attachment: ${file}`);
+      } catch (err) {
+        console.error(`Failed to delete old attachment: ${file}`, err);
+      }
+    }
+  });
+}
 
 /**
  * Unified email handler for list, read, and send operations
@@ -350,6 +489,13 @@ async function listEmails(accessToken, params) {
 async function readEmail(accessToken, params) {
   const { emailId } = params;
   
+  // Clean up old attachments periodically
+  try {
+    cleanupOldAttachments();
+  } catch (err) {
+    console.error('Error during attachment cleanup:', err);
+  }
+  
   if (!emailId) {
     return {
       content: [{ 
@@ -365,7 +511,8 @@ async function readEmail(accessToken, params) {
     `me/messages/${emailId}`,
     null,
     {
-      $select: 'subject,from,toRecipients,ccRecipients,receivedDateTime,body,hasAttachments,attachments'
+      $select: 'subject,from,toRecipients,ccRecipients,receivedDateTime,body,hasAttachments',
+      $expand: 'attachments'
     }
   );
   
@@ -378,6 +525,58 @@ async function readEmail(accessToken, params) {
   emailContent += `Date: ${new Date(response.receivedDateTime).toLocaleString()}\n`;
   emailContent += `Has Attachments: ${response.hasAttachments ? 'Yes' : 'No'}\n\n`;
   emailContent += `Body:\n${response.body.content}`;
+  
+  // Process attachments if present
+  if (response.attachments && response.attachments.length > 0) {
+    emailContent += '\n\nAttachments:\n';
+    
+    for (let i = 0; i < response.attachments.length; i++) {
+      const attachment = response.attachments[i];
+      emailContent += `${i + 1}. ${attachment.name}`;
+      
+      // Handle reference attachments (SharePoint/OneDrive files)
+      if (attachment['@odata.type'] === '#microsoft.graph.referenceAttachment' && attachment.sourceUrl) {
+        try {
+          // Convert SharePoint URL to local path
+          const localPath = convertSharePointUrlToLocal(attachment.sourceUrl);
+          if (localPath) {
+            emailContent += ` (SharePoint)\n   Local Path: ${localPath}\n   URL: ${attachment.sourceUrl}\n`;
+          } else {
+            emailContent += ` (SharePoint - unable to map to local path)\n   URL: ${attachment.sourceUrl}\n`;
+          }
+        } catch (err) {
+          console.error('Error mapping SharePoint attachment:', err);
+          emailContent += ` (SharePoint)\n   URL: ${attachment.sourceUrl}\n`;
+        }
+      } 
+      // Handle file attachments (embedded)
+      else if (attachment['@odata.type'] === '#microsoft.graph.fileAttachment') {
+        const sizeKB = attachment.size ? (attachment.size / 1024).toFixed(1) : 'Unknown';
+        
+        // Download attachment to temp directory
+        const localPath = await downloadEmbeddedAttachment(attachment, emailId, accessToken);
+        
+        if (localPath) {
+          emailContent += ` (Embedded file - ${sizeKB} KB)\n`;
+          emailContent += `   Type: ${attachment.contentType || 'Unknown'}\n`;
+          emailContent += `   Local Path: ${localPath}\n`;
+        } else {
+          emailContent += ` (Embedded file - ${sizeKB} KB - download failed)\n`;
+          emailContent += `   Type: ${attachment.contentType || 'Unknown'}\n`;
+        }
+      }
+      // Handle item attachments (Outlook items)
+      else if (attachment['@odata.type'] === '#microsoft.graph.itemAttachment') {
+        emailContent += ` (Outlook item)\n`;
+        if (attachment.item) {
+          emailContent += `   Item Type: ${attachment.item['@odata.type']}\n`;
+        }
+      }
+      else {
+        emailContent += ` (${attachment.contentType || 'Unknown type'})\n`;
+      }
+    }
+  }
   
   return {
     content: [{ type: "text", text: emailContent }]
