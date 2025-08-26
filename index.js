@@ -24,6 +24,7 @@ const { notificationTools } = require('./notifications');
 const { plannerTools } = require('./planner');
 const { filesTools } = require('./files');
 const { searchTools } = require('./search');
+const { contactsTools } = require('./contacts');
 // Future modules to be developed:
 // const { adminTools } = require('./admin');
 
@@ -43,7 +44,8 @@ const TOOLS = [
   ...notificationTools,
   ...plannerTools,
   ...filesTools,
-  ...searchTools
+  ...searchTools,
+  ...contactsTools
   // Future modules will be added here:
   // ...adminTools
 ];

@@ -6,13 +6,14 @@ This is a comprehensive implementation of the Office MCP (Model Context Protocol
 
 ## Features
 
-- **Complete Microsoft 365 Integration**: Email, Calendar, Teams, OneDrive/SharePoint, and Planner
+- **Complete Microsoft 365 Integration**: Email, Calendar, Teams, OneDrive/SharePoint, Contacts, and Planner
 - **Headless Operation**: Run without browser after initial authentication
 - **Automatic Token Management**: Persistent token storage with automatic refresh
 - **Email Attachment Handling**: Download embedded attachments and map SharePoint URLs to local paths
 - **Advanced Email Search**: Unified search with KQL support and automatic query optimization
 - **Teams Meeting Management**: Access transcripts, recordings, and AI insights
 - **File Management**: Full OneDrive and SharePoint file operations
+- **Contact Management**: Full CRUD operations for Outlook contacts with advanced search
 - **Task Management**: Complete Microsoft Planner integration
 - **Configurable Paths**: Environment variables for all local sync paths
 
@@ -81,6 +82,13 @@ npm run auth-server
 - **Batch Operations**: Upload/download multiple files
 - **Search**: Content and metadata search
 
+### Contact Management
+- **Full CRUD Operations**: Create, read, update, delete contacts
+- **Advanced Search**: Search by name, email, company, or any contact field
+- **Complete Contact Fields**: Support for emails, phones, addresses, birthdays, notes
+- **Folder Management**: Organize contacts in folders
+- **Bulk Operations**: Handle multiple contacts efficiently
+
 ### Task Management (Planner)
 - **Plan Operations**: Create and manage plans
 - **Task Assignment**: User lookup and assignment
@@ -119,6 +127,7 @@ To use this MCP server you need to first register and configure an app in Azure 
     - Mail.Send
     - Calendars.Read
     - Calendars.ReadWrite
+    - Contacts.ReadWrite
     - Files.Read
     - Files.ReadWrite
     - Files.ReadWrite.All

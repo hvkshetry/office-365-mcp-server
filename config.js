@@ -30,6 +30,7 @@ module.exports = {
       'Mail.Read', 'Mail.ReadWrite', 'Mail.Send', 'MailboxSettings.ReadWrite', 
       'User.Read', 'User.ReadWrite',
       'Calendars.Read', 'Calendars.ReadWrite',
+      'Contacts.ReadWrite',
       'Files.Read', 'Files.ReadWrite',
       'Team.ReadBasic.All', 'Team.Create',
       'Chat.Read', 'Chat.ReadWrite',
