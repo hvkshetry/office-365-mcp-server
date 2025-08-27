@@ -193,11 +193,20 @@ async function handleEmail(args) {
       case 'send':
         console.error('Calling sendEmail with params:', JSON.stringify(params));
         return await sendEmail(accessToken, params);
+      case 'draft':
+        console.error('Creating draft with params:', JSON.stringify(params));
+        return await createDraft(accessToken, params);
+      case 'update_draft':
+        return await updateDraft(accessToken, params);
+      case 'send_draft':
+        return await sendDraft(accessToken, params);
+      case 'list_drafts':
+        return await listDrafts(accessToken, params);
       default:
         return {
           content: [{ 
             type: "text", 
-            text: `Invalid operation: ${operation}. Valid operations are: list, read, send` 
+            text: `Invalid operation: ${operation}. Valid operations are: list, read, send, draft, update_draft, send_draft, list_drafts` 
           }]
         };
     }
@@ -697,6 +706,335 @@ async function sendEmail(accessToken, params) {
     console.error('Params received:', JSON.stringify(params));
     return {
       content: [{ type: "text", text: `Email send error: ${error.message}` }]
+    };
+  }
+}
+
+// ============== DRAFT EMAIL FUNCTIONS ==============
+
+async function createDraft(accessToken, params) {
+  try {
+    // Validate parameters
+    if (!params.subject && !params.body && !params.to) {
+      return {
+        content: [{ 
+          type: "text", 
+          text: "At least one parameter required: subject, body, or to" 
+        }]
+      };
+    }
+    
+    // Build draft message object
+    const draftMessage = {};
+    
+    if (params.subject) {
+      draftMessage.subject = params.subject;
+    }
+    
+    if (params.body) {
+      // Always use HTML content type for better formatting support
+      // Strip any CDATA wrappers if present
+      let bodyContent = params.body;
+      if (bodyContent.includes('<![CDATA[')) {
+        bodyContent = bodyContent.replace(/<!\[CDATA\[/g, '').replace(/\]\]>/g, '');
+      }
+      
+      // Ensure proper HTML structure with professional font styling
+      if (!bodyContent.includes('<html>')) {
+        // Add HTML wrapper with professional font family
+        bodyContent = `<html>
+<head>
+<style>
+body {
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, Arial, sans-serif;
+  font-size: 11pt;
+  color: #333333;
+}
+table {
+  border-collapse: collapse;
+  margin: 10px 0;
+}
+th, td {
+  border: 1px solid #ddd;
+  padding: 8px;
+  text-align: left;
+}
+th {
+  background-color: #f2f2f2;
+  font-weight: bold;
+}
+h3 {
+  color: #2c3e50;
+  margin-top: 15px;
+  margin-bottom: 10px;
+}
+ul, ol {
+  margin: 10px 0;
+}
+</style>
+</head>
+<body>${bodyContent}</body>
+</html>`;
+      } else if (!bodyContent.includes('font-family') && !bodyContent.includes('Gulim')) {
+        // If HTML exists but no font specified, inject font style
+        bodyContent = bodyContent.replace('<body>', `<body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, Arial, sans-serif; font-size: 11pt; color: #333333;">`);
+      }
+      
+      // Replace any Gulim font references with professional fonts
+      bodyContent = bodyContent.replace(/font-family:\s*["']?Gulim["']?[^;]*/gi, "font-family: 'Segoe UI', Tahoma, Geneva, Verdana, Arial, sans-serif");
+      
+      draftMessage.body = {
+        contentType: "HTML",
+        content: bodyContent
+      };
+    }
+    
+    if (params.to) {
+      const toRecipients = Array.isArray(params.to) ? params.to : [params.to];
+      draftMessage.toRecipients = toRecipients.map(email => ({
+        emailAddress: { address: email }
+      }));
+    }
+    
+    if (params.cc) {
+      const ccRecipients = Array.isArray(params.cc) ? params.cc : [params.cc];
+      draftMessage.ccRecipients = ccRecipients.map(email => ({
+        emailAddress: { address: email }
+      }));
+    }
+    
+    if (params.bcc) {
+      const bccRecipients = Array.isArray(params.bcc) ? params.bcc : [params.bcc];
+      draftMessage.bccRecipients = bccRecipients.map(email => ({
+        emailAddress: { address: email }
+      }));
+    }
+    
+    // Create draft via Graph API
+    const response = await callGraphAPI(
+      accessToken,
+      'POST',
+      'me/messages',
+      draftMessage,
+      null
+    );
+    
+    return {
+      content: [{ 
+        type: "text", 
+        text: `Draft created successfully!\nDraft ID: ${response.id}\nSubject: ${response.subject || '(No subject)'}` 
+      }]
+    };
+  } catch (error) {
+    console.error('Error creating draft:', error);
+    return {
+      content: [{ type: "text", text: `Error creating draft: ${error.message}` }]
+    };
+  }
+}
+
+async function updateDraft(accessToken, params) {
+  try {
+    const { draftId, ...updateParams } = params;
+    
+    if (!draftId) {
+      return {
+        content: [{ 
+          type: "text", 
+          text: "Missing required parameter: draftId" 
+        }]
+      };
+    }
+    
+    // Build update object
+    const updateMessage = {};
+    
+    if (updateParams.subject) {
+      updateMessage.subject = updateParams.subject;
+    }
+    
+    if (updateParams.body) {
+      // Always use HTML content type for better formatting support
+      // Strip any CDATA wrappers if present
+      let bodyContent = updateParams.body;
+      if (bodyContent.includes('<![CDATA[')) {
+        bodyContent = bodyContent.replace(/<!\[CDATA\[/g, '').replace(/\]\]>/g, '');
+      }
+      
+      // Ensure proper HTML structure with professional font styling
+      if (!bodyContent.includes('<html>')) {
+        // Add HTML wrapper with professional font family
+        bodyContent = `<html>
+<head>
+<style>
+body {
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, Arial, sans-serif;
+  font-size: 11pt;
+  color: #333333;
+}
+table {
+  border-collapse: collapse;
+  margin: 10px 0;
+}
+th, td {
+  border: 1px solid #ddd;
+  padding: 8px;
+  text-align: left;
+}
+th {
+  background-color: #f2f2f2;
+  font-weight: bold;
+}
+h3 {
+  color: #2c3e50;
+  margin-top: 15px;
+  margin-bottom: 10px;
+}
+ul, ol {
+  margin: 10px 0;
+}
+</style>
+</head>
+<body>${bodyContent}</body>
+</html>`;
+      } else if (!bodyContent.includes('font-family') && !bodyContent.includes('Gulim')) {
+        // If HTML exists but no font specified, inject font style
+        bodyContent = bodyContent.replace('<body>', `<body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, Arial, sans-serif; font-size: 11pt; color: #333333;">`);
+      }
+      
+      // Replace any Gulim font references with professional fonts
+      bodyContent = bodyContent.replace(/font-family:\s*["']?Gulim["']?[^;]*/gi, "font-family: 'Segoe UI', Tahoma, Geneva, Verdana, Arial, sans-serif");
+      
+      updateMessage.body = {
+        contentType: "HTML",
+        content: bodyContent
+      };
+    }
+    
+    if (updateParams.to) {
+      const toRecipients = Array.isArray(updateParams.to) ? updateParams.to : [updateParams.to];
+      updateMessage.toRecipients = toRecipients.map(email => ({
+        emailAddress: { address: email }
+      }));
+    }
+    
+    if (updateParams.cc) {
+      const ccRecipients = Array.isArray(updateParams.cc) ? updateParams.cc : [updateParams.cc];
+      updateMessage.ccRecipients = ccRecipients.map(email => ({
+        emailAddress: { address: email }
+      }));
+    }
+    
+    if (updateParams.bcc) {
+      const bccRecipients = Array.isArray(updateParams.bcc) ? updateParams.bcc : [updateParams.bcc];
+      updateMessage.bccRecipients = bccRecipients.map(email => ({
+        emailAddress: { address: email }
+      }));
+    }
+    
+    // Update draft via Graph API
+    const response = await callGraphAPI(
+      accessToken,
+      'PATCH',
+      `me/messages/${draftId}`,
+      updateMessage,
+      null
+    );
+    
+    return {
+      content: [{ 
+        type: "text", 
+        text: `Draft updated successfully!\nDraft ID: ${response.id}\nSubject: ${response.subject || '(No subject)'}` 
+      }]
+    };
+  } catch (error) {
+    console.error('Error updating draft:', error);
+    return {
+      content: [{ type: "text", text: `Error updating draft: ${error.message}` }]
+    };
+  }
+}
+
+async function sendDraft(accessToken, params) {
+  try {
+    const { draftId } = params;
+    
+    if (!draftId) {
+      return {
+        content: [{ 
+          type: "text", 
+          text: "Missing required parameter: draftId" 
+        }]
+      };
+    }
+    
+    // Send draft via Graph API - no body needed for this endpoint
+    await callGraphAPI(
+      accessToken,
+      'POST',
+      `me/messages/${draftId}/send`,
+      null,
+      null
+    );
+    
+    return {
+      content: [{ 
+        type: "text", 
+        text: "Draft sent successfully! The message has been moved to your Sent Items folder." 
+      }]
+    };
+  } catch (error) {
+    console.error('Error sending draft:', error);
+    return {
+      content: [{ type: "text", text: `Error sending draft: ${error.message}` }]
+    };
+  }
+}
+
+async function listDrafts(accessToken, params) {
+  try {
+    const { maxResults = 10 } = params;
+    
+    const queryParams = {
+      $top: maxResults,
+      $select: config.EMAIL_SELECT_FIELDS,
+      $orderby: 'lastModifiedDateTime desc'
+    };
+    
+    // Get drafts from the Drafts folder
+    const response = await callGraphAPI(
+      accessToken,
+      'GET',
+      'me/mailFolders/drafts/messages',
+      null,
+      queryParams
+    );
+    
+    if (!response.value || response.value.length === 0) {
+      return {
+        content: [{ type: "text", text: "No drafts found." }]
+      };
+    }
+    
+    const draftsList = response.value.map((draft, index) => {
+      const toRecipients = draft.toRecipients?.map(r => r.emailAddress.address).join(', ') || '(No recipients)';
+      const attachments = draft.hasAttachments ? ' 📎' : '';
+      return `${index + 1}. ${draft.subject || '(No subject)'}${attachments}
+   To: ${toRecipients}
+   Modified: ${new Date(draft.lastModifiedDateTime).toLocaleString()}
+   ID: ${draft.id}`;
+    }).join('\n\n');
+    
+    return {
+      content: [{ 
+        type: "text", 
+        text: `Found ${response.value.length} drafts:\n\n${draftsList}` 
+      }]
+    };
+  } catch (error) {
+    console.error('Error listing drafts:', error);
+    return {
+      content: [{ type: "text", text: `Error listing drafts: ${error.message}` }]
     };
   }
 }
@@ -1856,13 +2194,13 @@ async function listMentions(accessToken, params) {
 const emailTools = [
   {
     name: "email",
-    description: "Manage emails: list, read, or send messages",
+    description: "Manage emails: list, read, send messages, or manage drafts",
     inputSchema: {
       type: "object",
       properties: {
         operation: { 
           type: "string", 
-          enum: ["list", "read", "send"],
+          enum: ["list", "read", "send", "draft", "update_draft", "send_draft", "list_drafts"],
           description: "The operation to perform" 
         },
         // List parameters
@@ -1870,14 +2208,14 @@ const emailTools = [
         maxResults: { type: "number", description: "Maximum number of results (default: 10)" },
         // Read parameters
         emailId: { type: "string", description: "Email ID to read (for read operation)" },
-        // Send parameters
+        // Send/Draft parameters
         to: { 
           type: "array", 
           items: { type: "string" },
-          description: "Recipient email addresses (for send operation)" 
+          description: "Recipient email addresses (for send/draft operations)" 
         },
-        subject: { type: "string", description: "Email subject (for send operation)" },
-        body: { type: "string", description: "Email body in HTML format (for send operation)" },
+        subject: { type: "string", description: "Email subject (for send/draft operations)" },
+        body: { type: "string", description: "Email body in HTML format (for send/draft operations)" },
         cc: { 
           type: "array", 
           items: { type: "string" },
@@ -1887,7 +2225,9 @@ const emailTools = [
           type: "array", 
           items: { type: "string" },
           description: "BCC recipients (optional)" 
-        }
+        },
+        // Draft-specific parameters
+        draftId: { type: "string", description: "Draft ID (for update_draft and send_draft operations)" }
       },
       required: ["operation"]
     },
