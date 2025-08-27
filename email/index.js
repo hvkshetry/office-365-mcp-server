@@ -282,10 +282,28 @@ async function handleEmailSearch(args) {
     console.error(`Unified search - KQL Query: ${kqlQuery}`);
     console.error(`Search endpoint: ${searchEndpoint}`);
     
+    // Early exit to $filter for date-scoped searches
+    if (startDate || endDate) {
+      console.error('Date filters detected, using $filter directly');
+      return await searchUsingFilter(accessToken, {
+        query,
+        from,
+        to,
+        subject,
+        hasAttachments,
+        isRead,
+        importance,
+        startDate,
+        endDate,
+        endpoint: searchEndpoint,
+        maxResults
+      });
+    }
+    
     // Three-tier execution strategy
     
-    // Tier 1: Try Microsoft Search API (most powerful)
-    if (useRelevance || isComplexKQLQuery(kqlQuery)) {
+    // Tier 1: Try Microsoft Search API (most powerful) - skip if folder is specified
+    if ((useRelevance || isComplexKQLQuery(kqlQuery)) && !folderToSearch) {
       try {
         return await searchUsingMicrosoftSearchAPI(accessToken, {
           query: kqlQuery,
@@ -739,8 +757,9 @@ function buildKQLQuery(params) {
   // Check if query is already in KQL format
   if (params.query && isKQLFormat(params.query)) {
     kql.push(params.query);
-  } else if (params.query) {
+  } else if (params.query && params.query !== '*') {
     // Convert natural language to KQL - search in subject, body, and from
+    // Don't generate KQL for wildcard
     kql.push(`(subject:"${params.query}" OR body:"${params.query}" OR from:"${params.query}")`);
   }
   
@@ -927,9 +946,9 @@ async function searchUsingGraphSearch(accessToken, params) {
   );
   
   if (!response.value || response.value.length === 0) {
-    return {
-      content: [{ type: "text", text: "No emails found matching your search." }]
-    };
+    console.error('Graph $search returned 0 results, falling back to $filter');
+    // Don't return, fall through to let handler try $filter
+    throw new Error('No results from $search, trigger fallback');
   }
   
   const emailsList = response.value.map(email => {
@@ -969,9 +988,9 @@ async function searchUsingFilter(accessToken, params) {
   let filters = [];
   
   // Build filter conditions
-  if (query && !from && !subject) {
-    // Simple text search in subject or body preview
-    filters.push(`(contains(subject, '${query}') or contains(bodyPreview, '${query}'))`);
+  if (query && query !== '*' && !from && !subject) {
+    // Simple text search in subject only (bodyPreview doesn't support filtering)
+    filters.push(`contains(subject, '${query}')`);
   }
   
   if (from) {
@@ -998,14 +1017,18 @@ async function searchUsingFilter(accessToken, params) {
     filters.push(`importance eq '${importance}'`);
   }
   
+  // Determine correct date field based on folder
+  // Note: sentDateTime requires different API handling, for now use receivedDateTime for all
+  const dateField = 'receivedDateTime';
+  
   if (startDate) {
     const date = parseRelativeDate(startDate);
-    filters.push(`receivedDateTime ge ${date}T00:00:00Z`);
+    filters.push(`${dateField} ge ${date}T00:00:00Z`);
   }
   
   if (endDate) {
     const date = parseRelativeDate(endDate);
-    filters.push(`receivedDateTime le ${date}T23:59:59Z`);
+    filters.push(`${dateField} le ${date}T23:59:59Z`);
   }
   
   const filterQuery = filters.length > 0 ? filters.join(' and ') : null;
