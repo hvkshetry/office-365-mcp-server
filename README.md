@@ -264,16 +264,21 @@ For Windows background operation:
    - Check token file exists: `~/.office-mcp-tokens.json`
    - Verify redirect URI matches Azure configuration
 
-2. **Email Attachment Issues**
+2. **Email Search with Date Filters**
+   - Date-filtered searches now route directly to $filter API for reliability
+   - Use wildcard `*` for all emails in a date range
+   - Both `startDate` and `endDate` support ISO format (2025-08-27) or relative (7d/1w/1m/1y)
+
+3. **Email Attachment Issues**
    - Configure local sync paths in `.env`
    - Ensure temp directory has write permissions
    - Check SharePoint sync is active
 
-3. **API Rate Limits**
+4. **API Rate Limits**
    - Server includes automatic retry with exponential backoff
    - Reduce request frequency if persistent
 
-4. **Permission Errors**
+5. **Permission Errors**
    - Verify all required Graph API permissions are granted
    - Admin consent may be required for some permissions
 
