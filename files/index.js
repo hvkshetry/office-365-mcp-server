@@ -665,8 +665,8 @@ const filesTools = [
         };
       }
       
-      // Base sync path
-      const baseSyncPath = config.SHAREPOINT_SYNC_PATH;
+      // Base sync path from environment variable or config
+      const baseSyncPath = process.env.SHAREPOINT_SYNC_PATH || config.SHAREPOINT_SYNC_PATH;
       
       try {
         // Parse URL and extract path components
@@ -744,10 +744,14 @@ const filesTools = [
         // Add the rest of the path
         pathComponents.push(...pathAfterDocLib);
         
-        // Construct the local path
+        // Construct the local path using Windows path separator
+        const path = require('path');
         const localPath = pathComponents.length > 0 
-          ? `${baseSyncPath}/${pathComponents.join('/')}`
+          ? path.join(baseSyncPath, ...pathComponents)
           : baseSyncPath;
+        
+        // Also provide WSL path for Linux-based tools
+        const wslPath = localPath.replace(/^C:\\/, '/mnt/c/').replace(/\\/g, '/');
         
         // Also provide symlink path for subagent use
         const symlinkPath = pathComponents.length > 0
@@ -757,7 +761,7 @@ const filesTools = [
         return {
           content: [{
             type: "text",
-            text: `SharePoint URL mapped successfully:\n\nSharePoint: ${webUrl}\n\nLocal path (for main agent):\n${localPath}\n\nSymlink path (for subagent):\n${symlinkPath}`
+            text: `SharePoint URL mapped successfully:\n\nSharePoint: ${webUrl}\n\nWindows path:\n${localPath}\n\nWSL/Linux path:\n${wslPath}\n\nSymlink path (for subagent):\n${symlinkPath}`
           }]
         };
       } catch (error) {

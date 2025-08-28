@@ -65,7 +65,7 @@ module.exports = {
   DEFAULT_PAGE_SIZE: 25,
   MAX_RESULT_COUNT: 50,
   
-  // Local file paths
+  // Local file paths - MUST be configured via environment variables for your specific setup
   SHAREPOINT_SYNC_PATH: process.env.SHAREPOINT_SYNC_PATH || path.join(homeDir, 'SharePoint'),
   ONEDRIVE_SYNC_PATH: process.env.ONEDRIVE_SYNC_PATH || path.join(homeDir, 'OneDrive'),
   TEMP_ATTACHMENTS_PATH: process.env.TEMP_ATTACHMENTS_PATH || path.join(homeDir, 'temp', 'email-attachments'),
