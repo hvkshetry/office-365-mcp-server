@@ -778,22 +778,41 @@ async function getRecording(accessToken, params) {
  */
 async function getMeetingParticipants(accessToken, params) {
   const { meetingId } = params;
-  
+
   if (!meetingId) {
     return {
-      content: [{ 
-        type: "text", 
-        text: "Missing required parameter: meetingId" 
+      content: [{
+        type: "text",
+        text: "Missing required parameter: meetingId"
       }]
     };
   }
-  
+
   try {
+    // Convert thread ID to meeting ID if necessary
+    let actualMeetingId = meetingId;
+
+    if (meetingId.includes('@thread.v2')) {
+      try {
+        console.error('Attempting to convert thread ID to meeting ID for participants');
+        actualMeetingId = await convertThreadIdToMeetingId(accessToken, meetingId);
+        console.error('Conversion successful. New meeting ID:', actualMeetingId);
+      } catch (conversionError) {
+        console.error(`Unable to convert thread ID to meeting ID: ${conversionError.message}`);
+        return {
+          content: [{
+            type: "text",
+            text: `Unable to retrieve meeting participants. This might be because the meeting is still in progress or the attendance data isn't available: ${conversionError.message}`
+          }]
+        };
+      }
+    }
+
     // Try to get attendance records if available
     const response = await callGraphAPI(
       accessToken,
       'GET',
-      `me/onlineMeetings/${meetingId}/attendanceReports`
+      `me/onlineMeetings/${actualMeetingId}/attendanceReports`
     );
     
     if (!response.value || response.value.length === 0) {
@@ -812,7 +831,7 @@ async function getMeetingParticipants(accessToken, params) {
     const attendeesResponse = await callGraphAPI(
       accessToken,
       'GET',
-      `me/onlineMeetings/${meetingId}/attendanceReports/${latestReport.id}/attendanceRecords`
+      `me/onlineMeetings/${actualMeetingId}/attendanceReports/${latestReport.id}/attendanceRecords`
     );
     
     if (!attendeesResponse.value || attendeesResponse.value.length === 0) {
