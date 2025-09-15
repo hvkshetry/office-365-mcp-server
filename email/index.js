@@ -223,7 +223,7 @@ async function handleEmail(args) {
  * Unified email search handler - single powerful search with automatic optimization
  */
 async function handleEmailSearch(args) {
-  const { 
+  const {
     query,           // Required: KQL or natural language
     from,            // Optional: sender email filter
     to,              // Optional: recipient email filter
@@ -239,15 +239,9 @@ async function handleEmailSearch(args) {
     useRelevance = false, // Optional: relevance vs date sort
     includeDeleted = false // Optional: include deleted items
   } = args;
-  
-  if (!query) {
-    return {
-      content: [{ 
-        type: "text", 
-        text: "Missing required parameter: query" 
-      }]
-    };
-  }
+
+  // Handle empty query string - skip $search and use $filter directly
+  const isEmptyQuery = !query || query === "" || (typeof query === 'string' && query.trim() === "");
   
   try {
     const accessToken = await ensureAuthenticated();
@@ -274,7 +268,25 @@ async function handleEmailSearch(args) {
     if (folderToSearch) {
       searchEndpoint = `me/mailFolders/${folderToSearch}/messages`;
     }
-    
+
+    // If query is empty, go directly to $filter (for filtering by status, dates, etc.)
+    if (isEmptyQuery) {
+      console.error('Empty query detected, using $filter directly');
+      return await searchUsingFilter(accessToken, {
+        query: '',
+        from,
+        to,
+        subject,
+        hasAttachments,
+        isRead,
+        importance,
+        startDate,
+        endDate,
+        endpoint: searchEndpoint,
+        maxResults
+      });
+    }
+
     // Build KQL query from parameters
     const kqlQuery = buildKQLQuery({
       query,
@@ -287,13 +299,14 @@ async function handleEmailSearch(args) {
       startDate,
       endDate
     });
-    
+
     console.error(`Unified search - KQL Query: ${kqlQuery}`);
     console.error(`Search endpoint: ${searchEndpoint}`);
-    
-    // Early exit to $filter for date-scoped searches
-    if (startDate || endDate) {
-      console.error('Date filters detected, using $filter directly');
+
+    // Early exit to $filter for date-scoped searches ONLY if not KQL format
+    // KQL queries need to go through proper search tiers that understand KQL syntax
+    if ((startDate || endDate) && !isKQLFormat(query || '')) {
+      console.error('Date filters detected with non-KQL query, using $filter directly');
       return await searchUsingFilter(accessToken, {
         query,
         from,
@@ -334,21 +347,42 @@ async function handleEmailSearch(args) {
       });
     } catch (error) {
       console.error('Graph $search failed, falling back to $filter:', error.message);
-      
-      // Tier 3: Fall back to $filter
-      return await searchUsingFilter(accessToken, {
-        query,
-        from,
-        to,
-        subject,
-        hasAttachments,
-        isRead,
-        importance,
-        startDate,
-        endDate,
-        endpoint: searchEndpoint,
-        maxResults
-      });
+
+      // Tier 3: Fall back to $filter - but only if not a KQL query
+      // KQL queries with OR/AND operators cannot be handled by $filter
+      if (isKQLFormat(query || '')) {
+        // For KQL queries that failed with $search, we need to simplify
+        // Extract just the text terms without operators for basic filtering
+        const simplifiedQuery = (query || '').replace(/\s+(OR|AND|NOT)\s+/gi, ' ').trim();
+        return await searchUsingFilter(accessToken, {
+          query: simplifiedQuery,
+          from,
+          to,
+          subject,
+          hasAttachments,
+          isRead,
+          importance,
+          startDate,
+          endDate,
+          endpoint: searchEndpoint,
+          maxResults
+        });
+      } else {
+        // Non-KQL queries can use $filter normally
+        return await searchUsingFilter(accessToken, {
+          query,
+          from,
+          to,
+          subject,
+          hasAttachments,
+          isRead,
+          importance,
+          startDate,
+          endDate,
+          endpoint: searchEndpoint,
+          maxResults
+        });
+      }
     }
   } catch (error) {
     console.error('Error in unified email search:', error);
@@ -499,16 +533,19 @@ async function listEmails(accessToken, params) {
       content: [{ type: "text", text: "No emails found." }]
     };
   }
-  
+
   const emailsList = response.value.map(email => {
     const attachments = email.hasAttachments ? ' 📎' : '';
-    return `- ${email.subject}${attachments}\n  From: ${email.from.emailAddress.address}\n  Date: ${new Date(email.receivedDateTime).toLocaleString()}\n  ID: ${email.id}\n`;
+    const fromAddress = email.from?.emailAddress?.address || email.from?.address || 'Unknown sender';
+    const fromName = email.from?.emailAddress?.name || email.from?.name || '';
+    const fromDisplay = fromName ? `${fromName} <${fromAddress}>` : fromAddress;
+    return `- ${email.subject || '(No subject)'}${attachments}\n  From: ${fromDisplay}\n  Date: ${new Date(email.receivedDateTime).toLocaleString()}\n  ID: ${email.id}\n`;
   }).join('\n');
-  
+
   return {
-    content: [{ 
-      type: "text", 
-      text: `Found ${response.value.length} emails:\n\n${emailsList}` 
+    content: [{
+      type: "text",
+      text: `Found ${response.value.length} emails:\n\n${emailsList}`
     }]
   };
 }
@@ -1091,11 +1128,14 @@ async function getFolderIdByName(accessToken, folderName) {
  */
 function buildKQLQuery(params) {
   let kql = [];
-  
-  // Check if query is already in KQL format
-  if (params.query && isKQLFormat(params.query)) {
+
+  // Skip empty queries entirely
+  if (!params.query || params.query === '' || params.query.trim() === '') {
+    // Don't add any query term for empty queries
+  } else if (isKQLFormat(params.query)) {
+    // Check if query is already in KQL format
     kql.push(params.query);
-  } else if (params.query && params.query !== '*') {
+  } else if (params.query !== '*') {
     // Convert natural language to KQL - search in subject, body, and from
     // Don't generate KQL for wildcard
     kql.push(`(subject:"${params.query}" OR body:"${params.query}" OR from:"${params.query}")`);
@@ -1153,8 +1193,19 @@ function isKQLFormat(query) {
     'importance:',
     'received:'
   ];
-  
-  return kqlOperators.some(op => query.includes(op));
+
+  // Also check for OR/AND/NOT at the beginning of the query
+  const kqlPatterns = [
+    /^OR\s+/i,    // OR at start
+    /^AND\s+/i,   // AND at start
+    /^NOT\s+/i,   // NOT at start
+    /\sOR\s+/i,   // OR with spaces
+    /\sAND\s+/i,  // AND with spaces
+    /\sNOT\s+/i   // NOT with spaces
+  ];
+
+  return kqlOperators.some(op => query.includes(op)) ||
+         kqlPatterns.some(pattern => pattern.test(query));
 }
 
 /**
@@ -1293,8 +1344,9 @@ async function searchUsingGraphSearch(accessToken, params) {
     const attachments = email.hasAttachments ? ' 📎' : '';
     const importance = email.importance !== 'normal' ? ` [${email.importance}]` : '';
     const unread = !email.isRead ? ' *' : '';
-    
-    return `- ${email.subject}${attachments}${importance}${unread}\n  From: ${email.from.emailAddress.address}\n  Date: ${new Date(email.receivedDateTime).toLocaleString()}\n  ID: ${email.id}\n`;
+    const fromAddress = email.from?.emailAddress?.address || email.from?.address || 'Unknown sender';
+
+    return `- ${email.subject || '(No subject)'}${attachments}${importance}${unread}\n  From: ${fromAddress}\n  Date: ${new Date(email.receivedDateTime).toLocaleString()}\n  ID: ${email.id}\n`;
   }).join('\n');
   
   return {
@@ -1324,33 +1376,33 @@ async function searchUsingFilter(accessToken, params) {
   } = params;
   
   let filters = [];
-  
+
   // Build filter conditions
-  if (query && query !== '*' && !from && !subject) {
+  if (query && query !== '' && query !== '*' && !from && !subject) {
     // Simple text search in subject only (bodyPreview doesn't support filtering)
     filters.push(`contains(subject, '${query}')`);
   }
-  
+
   if (from) {
     filters.push(`from/emailAddress/address eq '${from}'`);
   }
-  
+
   if (to) {
     filters.push(`toRecipients/any(r: r/emailAddress/address eq '${to}')`);
   }
-  
+
   if (subject) {
     filters.push(`contains(subject, '${subject}')`);
   }
-  
+
   if (hasAttachments !== undefined) {
-    filters.push(`hasAttachments eq ${hasAttachments}`);
+    filters.push(`hasAttachments eq ${hasAttachments ? 'true' : 'false'}`);
   }
-  
+
   if (isRead !== undefined) {
-    filters.push(`isRead eq ${isRead}`);
+    filters.push(`isRead eq ${isRead ? 'true' : 'false'}`);
   }
-  
+
   if (importance) {
     filters.push(`importance eq '${importance}'`);
   }
@@ -1370,13 +1422,27 @@ async function searchUsingFilter(accessToken, params) {
   }
   
   const filterQuery = filters.length > 0 ? filters.join(' and ') : null;
-  
+
+  // Determine if we should include $orderby based on filter complexity
+  // MS Graph API requires orderby properties to appear in filter in correct order
+  // To avoid "restriction or sort order is too complex" errors, we skip orderby for complex filters
+  const hasDateFilter = (startDate || endDate);
+  const hasMultipleFilters = filters.length > 1;
+  const hasFolderSpecificEndpoint = endpoint && endpoint.includes('mailFolders');
+
+  // Skip orderby when using folder-specific endpoints with any filters to avoid complexity errors
+  // Only use orderby for non-folder searches or folder searches without filters
+  const shouldIncludeOrderBy = !hasFolderSpecificEndpoint || filters.length === 0;
+
   const queryParams = {
     $top: Math.min(maxResults, 250),
-    $select: config.EMAIL_SELECT_FIELDS,
-    $orderby: 'receivedDateTime desc'
+    $select: config.EMAIL_SELECT_FIELDS
   };
-  
+
+  if (shouldIncludeOrderBy) {
+    queryParams.$orderby = 'receivedDateTime desc';
+  }
+
   if (filterQuery) {
     queryParams.$filter = filterQuery;
   }
@@ -1399,8 +1465,9 @@ async function searchUsingFilter(accessToken, params) {
     const attachments = email.hasAttachments ? ' 📎' : '';
     const importance = email.importance !== 'normal' ? ` [${email.importance}]` : '';
     const unread = !email.isRead ? ' *' : '';
-    
-    return `- ${email.subject}${attachments}${importance}${unread}\n  From: ${email.from.emailAddress.address}\n  Date: ${new Date(email.receivedDateTime).toLocaleString()}\n  ID: ${email.id}\n`;
+    const fromAddress = email.from?.emailAddress?.address || email.from?.address || 'Unknown sender';
+
+    return `- ${email.subject || '(No subject)'}${attachments}${importance}${unread}\n  From: ${fromAddress}\n  Date: ${new Date(email.receivedDateTime).toLocaleString()}\n  ID: ${email.id}\n`;
   }).join('\n');
   
   return {
@@ -1443,7 +1510,8 @@ async function searchEmailsBasic(accessToken, params) {
   
   const emailsList = response.value.map(email => {
     const attachments = email.hasAttachments ? ' 📎' : '';
-    return `- ${email.subject}${attachments}\n  From: ${email.from.emailAddress.address}\n  Date: ${new Date(email.receivedDateTime).toLocaleString()}\n  ID: ${email.id}\n`;
+    const fromAddress = email.from?.emailAddress?.address || email.from?.address || 'Unknown sender';
+    return `- ${email.subject || '(No subject)'}${attachments}\n  From: ${fromAddress}\n  Date: ${new Date(email.receivedDateTime).toLocaleString()}\n  ID: ${email.id}\n`;
   }).join('\n');
   
   return {
@@ -1547,7 +1615,8 @@ async function searchEmailsSimple(accessToken, params) {
   
   const emailsList = response.value.map(email => {
     const attachments = email.hasAttachments ? ' 📎' : '';
-    return `- ${email.subject}${attachments}\n  From: ${email.from.emailAddress.address}\n  Date: ${new Date(email.receivedDateTime).toLocaleString()}\n  ID: ${email.id}\n`;
+    const fromAddress = email.from?.emailAddress?.address || email.from?.address || 'Unknown sender';
+    return `- ${email.subject || '(No subject)'}${attachments}\n  From: ${fromAddress}\n  Date: ${new Date(email.receivedDateTime).toLocaleString()}\n  ID: ${email.id}\n`;
   }).join('\n');
   
   return {
@@ -2297,7 +2366,7 @@ const emailTools = [
           description: "Include deleted items in search results" 
         }
       },
-      required: ["query"]
+      required: []
     },
     handler: handleEmailSearch
   },
