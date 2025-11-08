@@ -19,7 +19,9 @@
     "test:drive": "jest tests/drive.test.js",
     "test:planner": "jest tests/planner.test.js",
     "test:users": "jest tests/users.test.js",
-    "test:notifications": "jest tests/notifications.test.js"
+    "test:notifications": "jest tests/notifications.test.js",
+    "test:contacts": "jest tests/contact-extraction.test.js",
+    "test:newsletter": "jest tests/newsletter-detector.test.js"
   },
   "keywords": [
     "claude",

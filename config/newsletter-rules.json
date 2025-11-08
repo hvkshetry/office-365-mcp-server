@@ -1,0 +1,47 @@
+{
+  "whitelist": {
+    "comment": "Emails from these domains will NEVER be filtered as newsletters, even if they match newsletter patterns",
+    "domains": [
+      "example-important-vendor.com",
+      "trusted-partner.com"
+    ],
+    "senders": [
+      "important-newsletter@company.com",
+      "weekly-updates@team.com"
+    ]
+  },
+  "blacklist": {
+    "comment": "Emails from these domains/senders will ALWAYS be filtered as newsletters",
+    "domains": [
+      "marketing-platform.com",
+      "bulk-sender.com",
+      "promotional-emails.net"
+    ],
+    "senders": [
+      "noreply@spam-company.com",
+      "promotions@ads.com"
+    ]
+  },
+  "customPatterns": {
+    "comment": "Additional regex patterns to detect newsletters (applied to sender email addresses)",
+    "senderPatterns": [
+      "^promo@",
+      "^deals@",
+      "^offers@",
+      "^newsletter@",
+      "^marketing@"
+    ],
+    "subjectPatterns": [
+      "\\[PROMO\\]",
+      "\\[MARKETING\\]",
+      "Don't miss out",
+      "Limited time offer"
+    ]
+  },
+  "settings": {
+    "defaultThreshold": 60,
+    "enableCache": true,
+    "cacheMaxSize": 1000,
+    "logFilteredNewsletters": true
+  }
+}

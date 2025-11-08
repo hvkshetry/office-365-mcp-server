@@ -9,6 +9,7 @@ const config = require('../config');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { extractContactsFromEmails } = require('../tools/email-contact-extractor');
 
 /**
  * Helper function to convert SharePoint URLs to local sync paths
@@ -2493,6 +2494,53 @@ const emailTools = [
       required: ["operation"]
     },
     handler: handleEmailCategories
+  },
+  {
+    name: "extract_contacts_from_emails",
+    description: "Extract contact information from emails and export to CSV. Searches emails, extracts contacts from metadata and body (including LinkedIn URLs, phone numbers, company info), cross-references with Outlook contacts, and exports deduplicated results. Includes intelligent newsletter filtering to exclude marketing/bulk emails.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        searchQuery: {
+          type: "string",
+          description: "Optional KQL query to filter emails (e.g., 'partnership' or 'from:john@example.com')"
+        },
+        maxEmails: {
+          type: "number",
+          description: "Maximum number of emails to process (default: 1000, max: 10000)"
+        },
+        includeBody: {
+          type: "boolean",
+          description: "Parse email body for contacts (default: true)"
+        },
+        outputPath: {
+          type: "string",
+          description: "CSV output file path (default: ~/extracted_contacts.csv)"
+        },
+        startDate: {
+          type: "string",
+          description: "Filter emails from date - ISO format (2025-08-01) or relative (30d/1w/1m/1y)"
+        },
+        endDate: {
+          type: "string",
+          description: "Filter emails until date - ISO format or relative"
+        },
+        excludeNewsletters: {
+          type: "boolean",
+          description: "Filter out newsletters and marketing emails using intelligent detection (default: true). Uses multi-factor analysis including headers, sender patterns, and content."
+        },
+        newsletterThreshold: {
+          type: "number",
+          description: "Confidence threshold (0-100) for newsletter detection (default: 60). Higher values = stricter filtering."
+        },
+        saveNewsletterReport: {
+          type: "boolean",
+          description: "Save a detailed JSON report of filtered newsletters (default: false)"
+        }
+      },
+      required: []
+    },
+    handler: extractContactsFromEmails
   }
   // Removed email_mailtips and email_mentions - not functional with current permissions/setup
 ];
