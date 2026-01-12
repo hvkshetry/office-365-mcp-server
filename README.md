@@ -284,11 +284,13 @@ For Windows background operation:
 
 ## Security Considerations
 
-- **Token Storage**: Tokens are encrypted and stored locally
+- **Secure Token Storage**: Tokens are stored with restricted file permissions (0o600) using atomic writes to prevent corruption
+- **No Credential Logging**: Token content is never logged; only boolean presence checks are used
+- **Sensitive Data Redaction**: Email bodies, recipients, and search queries are not logged; API URLs with query params are gated behind DEBUG_VERBOSE
 - **Environment Variables**: Never commit `.env` files
 - **Client Secrets**: Rotate regularly and use Azure Key Vault in production
 - **Local Paths**: Use environment variables instead of hardcoding paths
-- **Audit Logging**: All API calls are logged for security monitoring
+- **Graceful Shutdown**: Proper SIGTERM/SIGINT handling for clean process termination
 
 ## Contributing
 

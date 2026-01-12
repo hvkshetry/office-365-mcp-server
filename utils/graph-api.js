@@ -32,6 +32,41 @@ function sleep(ms) {
 }
 
 /**
+ * Encode Graph API path segments intelligently
+ * Preserves OData operators ($value, $ref, $count) and drive path syntax (:/path:/content)
+ * @param {string} path - The API path to encode
+ * @returns {string} - Properly encoded path
+ */
+function encodeGraphPath(path) {
+  if (!path) return path;
+
+  // If path already contains encoded characters, assume it's already encoded
+  if (path.includes('%')) return path;
+
+  // Split path and process each segment
+  return path.split('/').map(segment => {
+    // Don't encode empty segments
+    if (!segment) return segment;
+
+    // Preserve OData operators: $value, $ref, $count, $batch, etc.
+    if (/^\$[a-zA-Z]+$/.test(segment)) return segment;
+
+    // Preserve drive path syntax that starts with colon (e.g., "root:", ":path", ":/Documents")
+    // These include OneDrive/SharePoint path-based addressing
+    if (segment.startsWith(':') || segment.endsWith(':')) return segment;
+
+    // Preserve segments that are purely alphanumeric with hyphens/underscores (IDs, simple names)
+    if (/^[a-zA-Z0-9_-]+$/.test(segment)) return segment;
+
+    // Preserve Graph function calls like search(q='...')
+    if (segment.includes('(') && segment.includes(')')) return segment;
+
+    // For other segments, encode but preserve colons for drive path syntax
+    return encodeURIComponent(segment).replace(/%3A/g, ':');
+  }).join('/');
+}
+
+/**
  * Makes a request to the Microsoft Graph API with retry logic
  * @param {string} accessToken - The access token for authentication
  * @param {string} method - HTTP method (GET, POST, etc.)
@@ -45,35 +80,37 @@ function sleep(ms) {
 async function callGraphAPI(accessToken, method, path, data = null, queryParams = {}, customHeaders = {}, retryCount = 0) {
   // For test tokens, we'll simulate the API call
   if (config.USE_TEST_MODE && accessToken.startsWith('test_access_token_')) {
-    console.error(`TEST MODE: Simulating ${method} ${path} API call`);
+    console.error(`[GRAPH-API] TEST MODE: ${method} ${path}`);
     return mockData.simulateGraphAPIResponse(method, path, data, queryParams);
   }
 
   try {
-    console.error(`Making real API call: ${method} ${path}`);
-    
-    // Encode path segments properly
-    const encodedPath = path.split('/')
-      .map(segment => encodeURIComponent(segment))
-      .join('/');
+    // Safe logging - only log path without sensitive query params
+    console.error(`[GRAPH-API] ${method} ${path.split('?')[0]}`);
+
+    // Clone queryParams to avoid mutating caller's object
+    const params = { ...queryParams };
+
+    // Encode path using Graph-aware encoder
+    const encodedPath = encodeGraphPath(path);
     
     // Build query string from parameters with special handling for OData filters
     let queryString = '';
-    if (queryParams && Object.keys(queryParams).length > 0) {
+    if (params && Object.keys(params).length > 0) {
       // Handle $filter parameter specially to ensure proper URI encoding
-      const filter = queryParams.$filter;
+      const filter = params.$filter;
       if (filter) {
-        delete queryParams.$filter; // Remove from regular params
+        delete params.$filter; // Remove from regular params
       }
-      
+
       // Build query string with proper encoding for regular params
-      const params = new URLSearchParams();
-      for (const [key, value] of Object.entries(queryParams)) {
-        params.append(key, value);
+      const urlParams = new URLSearchParams();
+      for (const [key, value] of Object.entries(params)) {
+        urlParams.append(key, value);
       }
-      
-      queryString = params.toString();
-      
+
+      queryString = urlParams.toString();
+
       // Add filter parameter separately with proper encoding
       if (filter) {
         if (queryString) {
@@ -82,46 +119,78 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
           queryString = `$filter=${encodeURIComponent(filter)}`;
         }
       }
-      
+
       if (queryString) {
         queryString = '?' + queryString;
       }
-      
-      console.error(`Query string: ${queryString}`);
+
+      // Only log query param count, not content (may contain sensitive data)
+      if (process.env.DEBUG_VERBOSE === 'true') {
+        console.error(`[GRAPH-API] Query params: ${Object.keys(params).length} params`);
+      }
+    }
+
+    const url = `${config.GRAPH_API_ENDPOINT}${encodedPath}${queryString}`;
+    // Only log full URL in verbose debug mode (may contain sensitive data)
+    if (process.env.DEBUG_VERBOSE === 'true') {
+      console.error(`[GRAPH-API] Full URL: ${url}`);
     }
     
-    const url = `${config.GRAPH_API_ENDPOINT}${encodedPath}${queryString}`;
-    console.error(`Full URL: ${url}`);
-    
+    // Determine if this is a binary request/response based on Content-Type
+    const requestContentType = customHeaders['Content-Type'] || 'application/json';
+    const isBinaryRequest = requestContentType.includes('application/octet-stream') ||
+                           requestContentType.includes('image/') ||
+                           requestContentType.includes('audio/') ||
+                           requestContentType.includes('video/') ||
+                           Buffer.isBuffer(data);
+
     return new Promise((resolve, reject) => {
       const options = {
         method: method,
         headers: {
           'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
+          'Content-Type': isBinaryRequest ? requestContentType : 'application/json',
           ...customHeaders
         }
       };
-      
+
       const req = https.request(url, options, (res) => {
-        let responseData = '';
-        
+        const responseContentType = res.headers['content-type'] || '';
+
+        // Determine if response should be handled as binary
+        const isBinaryResponse = responseContentType.includes('application/octet-stream') ||
+                                responseContentType.includes('image/') ||
+                                responseContentType.includes('audio/') ||
+                                responseContentType.includes('video/') ||
+                                responseContentType.includes('application/pdf') ||
+                                responseContentType.includes('application/vnd.openxmlformats');
+
+        // Collect response data - use array of buffers for binary, string for text
+        const chunks = [];
+
         res.on('data', (chunk) => {
-          responseData += chunk;
+          chunks.push(chunk);
         });
-        
+
         res.on('end', () => {
+          // Combine chunks appropriately
+          const responseData = isBinaryResponse
+            ? Buffer.concat(chunks)
+            : Buffer.concat(chunks).toString('utf8');
+
           if (res.statusCode >= 200 && res.statusCode < 300) {
-            const contentType = res.headers['content-type'] || '';
-            
-            // Handle non-JSON responses (like WEBVTT transcripts)
-            if (contentType.includes('text/vtt') || contentType.includes('text/plain') || 
-                contentType.includes('application/vnd.openxmlformats') || 
-                !contentType.includes('json')) {
-              // Return raw text for transcript content and other non-JSON responses
-              resolve(responseData);
-            } else {
-              // Parse JSON responses
+            // Handle binary responses
+            if (isBinaryResponse) {
+              resolve(responseData); // Return Buffer
+            }
+            // Handle text/non-JSON responses (like WEBVTT transcripts)
+            else if (responseContentType.includes('text/vtt') ||
+                     responseContentType.includes('text/plain') ||
+                     !responseContentType.includes('json')) {
+              resolve(responseData); // Return string
+            }
+            // Parse JSON responses
+            else {
               try {
                 const jsonResponse = JSON.parse(responseData);
                 resolve(jsonResponse);
@@ -178,15 +247,22 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
       req.on('error', (error) => {
         reject(new Error(`Network error during API call: ${error.message}`));
       });
-      
+
+      // Write request body if present
       if (data && (method === 'POST' || method === 'PATCH' || method === 'PUT')) {
-        req.write(JSON.stringify(data));
+        if (isBinaryRequest || Buffer.isBuffer(data)) {
+          // Write binary data directly (Buffer or raw bytes)
+          req.write(Buffer.isBuffer(data) ? data : Buffer.from(data));
+        } else {
+          // Serialize JSON data
+          req.write(JSON.stringify(data));
+        }
       }
-      
+
       req.end();
     });
   } catch (error) {
-    console.error('Error calling Graph API:', error);
+    console.error('[GRAPH-API] Error:', error.message);
     throw error;
   }
 }

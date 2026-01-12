@@ -150,51 +150,41 @@ function cleanupOldAttachments() {
  * Unified email handler for list, read, and send operations
  */
 async function handleEmail(args) {
-  console.error('handleEmail received raw args:', JSON.stringify(args));
-  console.error('handleEmail args type:', typeof args);
-  console.error('handleEmail args is null?', args === null);
-  console.error('handleEmail args is undefined?', args === undefined);
-  
   if (!args || typeof args !== 'object') {
     return {
-      content: [{ 
-        type: "text", 
-        text: `DEBUG: Invalid args object. Type: ${typeof args}, Value: ${args}` 
+      content: [{
+        type: "text",
+        text: "Invalid args: expected an object with 'operation' parameter"
       }]
     };
   }
-  
+
   const { operation, ...params } = args;
-  
-  console.error('handleEmail after destructuring - operation:', operation);
-  console.error('handleEmail after destructuring - params:', JSON.stringify(params));
-  
+
   if (!operation) {
     return {
-      content: [{ 
-        type: "text", 
-        text: "Missing required parameter: operation. Valid operations are: list, read, send" 
+      content: [{
+        type: "text",
+        text: "Missing required parameter: operation. Valid operations are: list, read, send, draft, update_draft, send_draft, list_drafts"
       }]
     };
   }
-  
+
+  console.error(`[EMAIL] Operation: ${operation}`);
+
   try {
     const accessToken = await ensureAuthenticated();
-    
-    console.error('handleEmail received args:', JSON.stringify(args));
-    console.error('handleEmail operation:', operation);
-    console.error('handleEmail params:', JSON.stringify(params));
-    
+
     switch (operation) {
       case 'list':
         return await listEmails(accessToken, params);
       case 'read':
         return await readEmail(accessToken, params);
       case 'send':
-        console.error('Calling sendEmail with params:', JSON.stringify(params));
+        console.error('[EMAIL] Sending email');
         return await sendEmail(accessToken, params);
       case 'draft':
-        console.error('Creating draft with params:', JSON.stringify(params));
+        console.error('[EMAIL] Creating draft');
         return await createDraft(accessToken, params);
       case 'update_draft':
         return await updateDraft(accessToken, params);
@@ -649,21 +639,12 @@ async function readEmail(accessToken, params) {
 
 async function sendEmail(accessToken, params) {
   try {
-    console.error('sendEmail called with accessToken type:', typeof accessToken);
-    console.error('sendEmail called with params type:', typeof params);
-    console.error('sendEmail called with params value:', params);
-    console.error('sendEmail called with params JSON:', JSON.stringify(params));
-    
     // Basic validation
     if (!params || typeof params !== 'object') {
-      console.error('DEBUG: Invalid params object detected');
-      console.error('DEBUG: params is null?', params === null);
-      console.error('DEBUG: params is undefined?', params === undefined);
-      console.error('DEBUG: typeof params:', typeof params);
       return {
-        content: [{ 
-          type: "text", 
-          text: `DEBUG: Invalid parameters object. Type: ${typeof params}, Value: ${params}` 
+        content: [{
+          type: "text",
+          text: "Invalid parameters: expected an object with to, subject, and body"
         }]
       };
     }
@@ -738,9 +719,7 @@ async function sendEmail(accessToken, params) {
       content: [{ type: "text", text: "Email sent successfully!" }]
     };
   } catch (error) {
-    console.error('Error in sendEmail:', error);
-    console.error('Error stack:', error.stack);
-    console.error('Params received:', JSON.stringify(params));
+    console.error('[EMAIL] Send error:', error.message);
     return {
       content: [{ type: "text", text: `Email send error: ${error.message}` }]
     };

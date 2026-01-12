@@ -27,17 +27,20 @@ module.exports = {
     clientSecret: process.env.OFFICE_CLIENT_SECRET || '',
     redirectUri: 'http://localhost:3000/auth/callback',
     scopes: [
-      'Mail.Read', 'Mail.ReadWrite', 'Mail.Send', 'MailboxSettings.ReadWrite', 
-      'User.Read', 'User.ReadWrite',
+      'offline_access',  // CRITICAL: Required for refresh tokens
+      'User.Read', 'User.ReadWrite', 'User.ReadBasic.All',
+      'Mail.Read', 'Mail.ReadWrite', 'Mail.Send', 'MailboxSettings.ReadWrite',
       'Calendars.Read', 'Calendars.ReadWrite',
       'Contacts.ReadWrite',
-      'Files.Read', 'Files.ReadWrite',
+      'Files.Read', 'Files.ReadWrite', 'Files.ReadWrite.All',
       'Team.ReadBasic.All', 'Team.Create',
       'Chat.Read', 'Chat.ReadWrite',
       'ChannelMessage.Read.All', 'ChannelMessage.Send',
       'OnlineMeetingTranscript.Read.All',
       'OnlineMeetings.ReadWrite',
-      'Tasks.Read', 'Tasks.ReadWrite'
+      'Tasks.Read', 'Tasks.ReadWrite',
+      'Group.Read.All', 'Directory.Read.All',
+      'Presence.Read', 'Presence.ReadWrite'
     ],
     tokenStorePath: path.join(homeDir, '.office-mcp-tokens.json'),
     authServerUrl: 'http://localhost:3000'

@@ -78,8 +78,17 @@ async function refreshAccessToken() {
                 newTokens.email = tokens.email;
               }
               
-              // Save refreshed tokens
-              fs.writeFileSync(tokenPath, JSON.stringify(newTokens, null, 2), 'utf8');
+              // Preserve refresh_token if Microsoft didn't return a new one
+              if (!newTokens.refresh_token && tokens.refresh_token) {
+                newTokens.refresh_token = tokens.refresh_token;
+              }
+
+              // Save refreshed tokens with secure permissions (atomic write)
+              const tempPath = tokenPath + '.tmp';
+              fs.writeFileSync(tempPath, JSON.stringify(newTokens, null, 2), { mode: 0o600 });
+              fs.renameSync(tempPath, tokenPath);
+              try { fs.chmodSync(tokenPath, 0o600); } catch (e) { /* Windows may not support chmod */ }
+
               console.error('[AUTO-REFRESH] Token refresh successful');
               console.error(`[AUTO-REFRESH] New token expires at: ${new Date(expiresAt).toLocaleString()}`);
               

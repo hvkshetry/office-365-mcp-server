@@ -5,6 +5,7 @@ const path = require('path');
 const os = require('os');
 const https = require('https');
 require('dotenv').config();
+const config = require('./config');
 
 // MCP Server Auth Helper for Office MCP
 // This server handles the OAuth2 redirect callback from Microsoft
@@ -104,7 +105,7 @@ app.get('/auth', (req, res) => {
     client_id: requestedClientId,
     response_type: 'code',
     redirect_uri: `http://localhost:${PORT}/auth/callback`,
-    scope: 'offline_access User.Read User.ReadWrite User.ReadBasic.All Mail.Read Mail.ReadWrite Mail.Send Calendars.Read Calendars.ReadWrite Files.Read Files.ReadWrite Files.ReadWrite.All Team.ReadBasic.All Team.Create Chat.Read Chat.ReadWrite ChannelMessage.Read.All ChannelMessage.Send OnlineMeetingTranscript.Read.All OnlineMeetings.ReadWrite Tasks.Read Tasks.ReadWrite Group.Read.All Directory.Read.All Presence.Read Presence.ReadWrite',
+    scope: config.AUTH_CONFIG.scopes.join(' '),
     response_mode: 'query',
     state: state,
     tenant: tenantId
@@ -259,7 +260,7 @@ function exchangeCodeForTokens(code) {
       code: code,
       redirect_uri: `http://localhost:${PORT}/auth/callback`,
       grant_type: 'authorization_code',
-      scope: 'offline_access User.Read User.ReadWrite User.ReadBasic.All Mail.Read Mail.ReadWrite Mail.Send Calendars.Read Calendars.ReadWrite Files.Read Files.ReadWrite Files.ReadWrite.All Team.ReadBasic.All Team.Create Chat.Read Chat.ReadWrite ChannelMessage.Read.All ChannelMessage.Send OnlineMeetingTranscript.Read.All OnlineMeetings.ReadWrite Tasks.Read Tasks.ReadWrite Group.Read.All Directory.Read.All Presence.Read Presence.ReadWrite'
+      scope: config.AUTH_CONFIG.scopes.join(' ')
     }).toString();
     
     const options = {
@@ -301,9 +302,12 @@ function exchangeCodeForTokens(code) {
             // Add expires_at for easier expiration checking
             tokenResponse.expires_at = expiresAt;
             
-            // Save tokens to file
-            fs.writeFileSync(TOKEN_FILE, JSON.stringify(tokenResponse, null, 2), 'utf8');
-            console.log(`Tokens saved to ${TOKEN_FILE}`);
+            // Save tokens to file with secure permissions (atomic write)
+            const tempFile = TOKEN_FILE + '.tmp';
+            fs.writeFileSync(tempFile, JSON.stringify(tokenResponse, null, 2), { mode: 0o600 });
+            fs.renameSync(tempFile, TOKEN_FILE);
+            try { fs.chmodSync(TOKEN_FILE, 0o600); } catch (e) { /* Windows may not support chmod */ }
+            console.log(`Tokens saved securely to ${TOKEN_FILE}`);
             
             resolve(tokenResponse);
           } catch (error) {

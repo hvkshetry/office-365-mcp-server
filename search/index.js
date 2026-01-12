@@ -52,7 +52,8 @@ async function handleSearch(args) {
 async function smartUnifiedSearch(accessToken, args) {
   const {
     query,
-    entityTypes = ['driveItem', 'message', 'event', 'listItem'],
+    // Default to compatible entity types (files only) - message/event can't be combined with driveItem/listItem
+    entityTypes = ['driveItem', 'listItem'],
     limit = 25,
     from = 0,
     fileTypes,
@@ -63,7 +64,7 @@ async function smartUnifiedSearch(accessToken, args) {
     sortBy,
     filters
   } = args;
-  
+
   // Build intelligent KQL query
   const kqlQuery = buildSmartKQLQuery(query, {
     fileTypes,
@@ -71,10 +72,19 @@ async function smartUnifiedSearch(accessToken, args) {
     filters,
     hasEmailFilters: query.includes('from:') || query.includes('to:') || query.includes('subject:')
   });
-  
+
   // Validate and adjust entity types for compatibility
   const validEntityTypes = validateEntityTypes(entityTypes);
-  
+
+  // Determine appropriate size limit based on entity types
+  // Microsoft Graph Search API limits: message/event = 25 max, driveItem/listItem = 500 max
+  const hasMessageOrEvent = validEntityTypes.some(t => ['message', 'event', 'chatMessage'].includes(t));
+  const effectiveLimit = hasMessageOrEvent ? Math.min(limit, 25) : Math.min(limit, 500);
+
+  if (hasMessageOrEvent && limit > 25) {
+    console.error(`[SEARCH] Limit capped to 25 for message/event entity types (requested: ${limit})`);
+  }
+
   // Build search request with all advanced features
   const searchRequest = {
     requests: [{
@@ -83,7 +93,7 @@ async function smartUnifiedSearch(accessToken, args) {
         queryString: kqlQuery
       },
       from: from,
-      size: Math.min(limit, 500), // Max 500 per Graph API limits
+      size: effectiveLimit,
       
       // Always enable query improvements
       queryAlterationOptions: {

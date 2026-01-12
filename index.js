@@ -153,10 +153,24 @@ server.fallbackRequestHandler = async (request) => {
   }
 };
 
-// Make the script executable
-process.on('SIGTERM', () => {
-  console.error('SIGTERM received but staying alive');
-});
+// Graceful shutdown handlers
+let isShuttingDown = false;
+
+function gracefulShutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+
+  console.error(`[SHUTDOWN] ${signal} received, shutting down gracefully`);
+
+  // Give pending operations time to complete
+  setTimeout(() => {
+    console.error('[SHUTDOWN] Exiting');
+    process.exit(0);
+  }, 1000);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // Start the server
 const transport = new StdioServerTransport();
