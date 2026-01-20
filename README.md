@@ -4,6 +4,9 @@ This is a comprehensive implementation of the Office MCP (Model Context Protocol
 
 > **🚀 Headless Operation!** Run without browser authentication after initial setup. Automatic token refresh and Windows Task Scheduler support for invisible background operation. See [TASK_SCHEDULER_SETUP.md](TASK_SCHEDULER_SETUP.md) for Windows setup guide.
 
+
+> **⚠️ DEVELOPMENT STATUS: This project is under active development and is not yet production-ready. APIs, interfaces, and functionality may change without notice. Use at your own risk for evaluation and testing purposes only. Not recommended for production deployments.**
+
 ## Features
 
 - **Complete Microsoft 365 Integration**: Email, Calendar, Teams, OneDrive/SharePoint, Contacts, and Planner
