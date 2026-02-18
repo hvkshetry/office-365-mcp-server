@@ -1,153 +1,25 @@
 /**
- * Consolidated Email module
- * Reduces from 11 tools to 4 tools with operation parameters
+ * Consolidated Email module - thin router
+ * Delegates to submodules: search, folders, rules, categories, attachments, focused
  */
 
 const { ensureAuthenticated } = require('../auth');
 const { callGraphAPI } = require('../utils/graph-api');
+const { safeTool } = require('../utils/errors');
 const config = require('../config');
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
+
+// Submodule imports
+const { handleEmailSearch } = require('./search');
+const { handleEmailMove, handleEmailFolder } = require('./folders');
+const { handleEmailRules } = require('./rules');
+const { handleEmailCategories } = require('./categories');
+const { getFocusedInbox } = require('./focused');
+const { convertSharePointUrlToLocal, downloadEmbeddedAttachment, cleanupOldAttachments } = require('./attachments');
+
+// ============== CORE EMAIL CRUD ==============
 
 /**
- * Helper function to convert SharePoint URLs to local sync paths
- * @param {string} sharePointUrl - The SharePoint URL to convert
- * @returns {string|null} - The local path or null if unable to map
- */
-function convertSharePointUrlToLocal(sharePointUrl) {
-  try {
-    // Parse the SharePoint URL
-    const url = new URL(sharePointUrl);
-    const pathParts = url.pathname.split('/');
-    
-    // Look for sites index
-    const sitesIndex = pathParts.indexOf('sites');
-    if (sitesIndex === -1) {
-      // Check for personal OneDrive format
-      if (url.hostname.includes('-my.sharepoint.com')) {
-        // Personal OneDrive format: https://circleh2o-my.sharepoint.com/personal/user_domain/...
-        const personalIndex = pathParts.indexOf('personal');
-        if (personalIndex !== -1 && pathParts.length > personalIndex + 2) {
-          const remainingPath = pathParts.slice(personalIndex + 2).join('/');
-          return `${config.ONEDRIVE_SYNC_PATH}/${decodeURIComponent(remainingPath)}`;
-        }
-      }
-      return null;
-    }
-    
-    // Get site name (e.g., "Proposals")
-    const siteName = pathParts[sitesIndex + 1];
-    
-    // Find "Shared Documents" or "Documents" index
-    let docsIndex = pathParts.indexOf('Shared Documents');
-    if (docsIndex === -1) {
-      docsIndex = pathParts.indexOf('Documents');
-    }
-    
-    if (docsIndex === -1) {
-      return null;
-    }
-    
-    // Get remaining path after documents folder
-    const docPath = pathParts.slice(docsIndex + 1).join('/');
-    
-    // Construct local path
-    // Pattern: [SHAREPOINT_SYNC_PATH]/[Site] - Documents/[remaining path]
-    const localPath = `${config.SHAREPOINT_SYNC_PATH}/${siteName} - Documents/${decodeURIComponent(docPath)}`;
-    
-    return localPath;
-  } catch (err) {
-    console.error('Error parsing SharePoint URL:', err);
-    return null;
-  }
-}
-
-/**
- * Download and save embedded attachment to local temp directory
- * @param {object} attachment - The attachment object from Graph API
- * @param {string} emailId - The email ID for API calls
- * @param {string} accessToken - Auth token for Graph API
- * @returns {string|null} - Local file path or null on error
- */
-async function downloadEmbeddedAttachment(attachment, emailId, accessToken) {
-  try {
-    const tempDir = config.TEMP_ATTACHMENTS_PATH;
-    
-    // Ensure directory exists
-    if (!fs.existsSync(tempDir)) {
-      fs.mkdirSync(tempDir, { recursive: true });
-    }
-    
-    // Generate unique filename to avoid conflicts
-    const timestamp = Date.now();
-    const hash = crypto.createHash('md5').update(attachment.id).digest('hex').substring(0, 8);
-    const sanitizedName = attachment.name.replace(/[^a-zA-Z0-9.-]/g, '_');
-    const fileName = `${timestamp}_${hash}_${sanitizedName}`;
-    const filePath = path.join(tempDir, fileName);
-    
-    let fileData;
-    
-    // Check if contentBytes is available (small files < 3MB)
-    if (attachment.contentBytes) {
-      // Use existing base64 data
-      fileData = Buffer.from(attachment.contentBytes, 'base64');
-    } else {
-      // Large file - fetch using /$value endpoint
-      const binaryData = await callGraphAPI(
-        accessToken,
-        'GET',
-        `me/messages/${emailId}/attachments/${attachment.id}/$value`,
-        null,
-        {}
-      );
-      
-      // callGraphAPI returns raw data for non-JSON responses
-      fileData = Buffer.from(binaryData, 'binary');
-    }
-    
-    // Save to file
-    fs.writeFileSync(filePath, fileData);
-    
-    console.error(`Attachment saved to: ${filePath}`);
-    return filePath;
-    
-  } catch (err) {
-    console.error('Error downloading attachment:', err);
-    return null;
-  }
-}
-
-/**
- * Clean up old attachment files (older than 24 hours)
- */
-function cleanupOldAttachments() {
-  const tempDir = config.TEMP_ATTACHMENTS_PATH;
-  const maxAge = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
-  
-  if (!fs.existsSync(tempDir)) return;
-  
-  const files = fs.readdirSync(tempDir);
-  const now = Date.now();
-  
-  files.forEach(file => {
-    const filePath = path.join(tempDir, file);
-    const stats = fs.statSync(filePath);
-    const age = now - stats.mtimeMs;
-    
-    if (age > maxAge) {
-      try {
-        fs.unlinkSync(filePath);
-        console.error(`Cleaned up old attachment: ${file}`);
-      } catch (err) {
-        console.error(`Failed to delete old attachment: ${file}`, err);
-      }
-    }
-  });
-}
-
-/**
- * Unified email handler for list, read, and send operations
+ * Core email handler for list, read, send, reply, and draft operations
  */
 async function handleEmail(args) {
   if (!args || typeof args !== 'object') {
@@ -165,7 +37,7 @@ async function handleEmail(args) {
     return {
       content: [{
         type: "text",
-        text: "Missing required parameter: operation. Valid operations are: list, read, send, draft, update_draft, send_draft, list_drafts"
+        text: "Missing required parameter: operation. Valid operations are: list, read, send, reply, draft, update_draft, send_draft, list_drafts"
       }]
     };
   }
@@ -183,6 +55,9 @@ async function handleEmail(args) {
       case 'send':
         console.error('[EMAIL] Sending email');
         return await sendEmail(accessToken, params);
+      case 'reply':
+        console.error('[EMAIL] Replying to email');
+        return await replyToEmail(accessToken, params);
       case 'draft':
         console.error('[EMAIL] Creating draft');
         return await createDraft(accessToken, params);
@@ -194,9 +69,9 @@ async function handleEmail(args) {
         return await listDrafts(accessToken, params);
       default:
         return {
-          content: [{ 
-            type: "text", 
-            text: `Invalid operation: ${operation}. Valid operations are: list, read, send, draft, update_draft, send_draft, list_drafts` 
+          content: [{
+            type: "text",
+            text: `Invalid operation: ${operation}. Valid operations are: list, read, send, reply, draft, update_draft, send_draft, list_drafts`
           }]
         };
     }
@@ -209,307 +84,19 @@ async function handleEmail(args) {
   }
 }
 
-/**
- * Unified email search handler - single powerful search with automatic optimization
- */
-async function handleEmailSearch(args) {
-  const {
-    query,           // Required: KQL or natural language
-    from,            // Optional: sender email filter
-    to,              // Optional: recipient email filter
-    subject,         // Optional: subject line filter
-    hasAttachments,  // Optional: boolean
-    isRead,          // Optional: boolean
-    importance,      // Optional: high/normal/low
-    startDate,       // Optional: ISO or relative (7d/1w/1m/1y)
-    endDate,         // Optional: ISO or relative
-    folderId,        // Optional: folder ID to search in
-    folderName,      // Optional: folder name (auto-converts to ID)
-    maxResults = 25, // Optional: max 1000
-    useRelevance = false, // Optional: relevance vs date sort
-    includeDeleted = false // Optional: include deleted items
-  } = args;
-
-  // Handle empty query string - skip $search and use $filter directly
-  const isEmptyQuery = !query || query === "" || (typeof query === 'string' && query.trim() === "");
-  
-  try {
-    const accessToken = await ensureAuthenticated();
-    
-    // Handle folder filtering
-    let searchEndpoint = 'me/messages';
-    let folderToSearch = null;
-    
-    if (folderId) {
-      folderToSearch = folderId;
-    } else if (folderName) {
-      // Convert folder name to ID
-      folderToSearch = await getFolderIdByName(accessToken, folderName);
-      if (!folderToSearch) {
-        return {
-          content: [{ 
-            type: "text", 
-            text: `Folder '${folderName}' not found. Check folder name or use folderId.` 
-          }]
-        };
-      }
-    }
-    
-    if (folderToSearch) {
-      searchEndpoint = `me/mailFolders/${folderToSearch}/messages`;
-    }
-
-    // If query is empty, go directly to $filter (for filtering by status, dates, etc.)
-    if (isEmptyQuery) {
-      console.error('Empty query detected, using $filter directly');
-      return await searchUsingFilter(accessToken, {
-        query: '',
-        from,
-        to,
-        subject,
-        hasAttachments,
-        isRead,
-        importance,
-        startDate,
-        endDate,
-        endpoint: searchEndpoint,
-        maxResults
-      });
-    }
-
-    // Build KQL query from parameters
-    const kqlQuery = buildKQLQuery({
-      query,
-      from,
-      to,
-      subject,
-      hasAttachments,
-      isRead,
-      importance,
-      startDate,
-      endDate
-    });
-
-    console.error(`Unified search - KQL Query: ${kqlQuery}`);
-    console.error(`Search endpoint: ${searchEndpoint}`);
-
-    // Early exit to $filter for date-scoped searches ONLY if not KQL format
-    // KQL queries need to go through proper search tiers that understand KQL syntax
-    if ((startDate || endDate) && !isKQLFormat(query || '')) {
-      console.error('Date filters detected with non-KQL query, using $filter directly');
-      return await searchUsingFilter(accessToken, {
-        query,
-        from,
-        to,
-        subject,
-        hasAttachments,
-        isRead,
-        importance,
-        startDate,
-        endDate,
-        endpoint: searchEndpoint,
-        maxResults
-      });
-    }
-    
-    // Three-tier execution strategy
-    
-    // Tier 1: Try Microsoft Search API (most powerful) - skip if folder is specified
-    if ((useRelevance || isComplexKQLQuery(kqlQuery)) && !folderToSearch) {
-      try {
-        return await searchUsingMicrosoftSearchAPI(accessToken, {
-          query: kqlQuery,
-          maxResults,
-          useRelevance,
-          includeDeleted
-        });
-      } catch (error) {
-        console.error('Microsoft Search API failed, falling back:', error.message);
-      }
-    }
-    
-    // Tier 2: Try $search with KQL
-    try {
-      return await searchUsingGraphSearch(accessToken, {
-        query: kqlQuery,
-        endpoint: searchEndpoint,
-        maxResults
-      });
-    } catch (error) {
-      console.error('Graph $search failed, falling back to $filter:', error.message);
-
-      // Tier 3: Fall back to $filter - but only if not a KQL query
-      // KQL queries with OR/AND operators cannot be handled by $filter
-      if (isKQLFormat(query || '')) {
-        // For KQL queries that failed with $search, we need to simplify
-        // Extract just the text terms without operators for basic filtering
-        const simplifiedQuery = (query || '').replace(/\s+(OR|AND|NOT)\s+/gi, ' ').trim();
-        return await searchUsingFilter(accessToken, {
-          query: simplifiedQuery,
-          from,
-          to,
-          subject,
-          hasAttachments,
-          isRead,
-          importance,
-          startDate,
-          endDate,
-          endpoint: searchEndpoint,
-          maxResults
-        });
-      } else {
-        // Non-KQL queries can use $filter normally
-        return await searchUsingFilter(accessToken, {
-          query,
-          from,
-          to,
-          subject,
-          hasAttachments,
-          isRead,
-          importance,
-          startDate,
-          endDate,
-          endpoint: searchEndpoint,
-          maxResults
-        });
-      }
-    }
-  } catch (error) {
-    console.error('Error in unified email search:', error);
-    return {
-      content: [{ type: "text", text: `Error in email search: ${error.message}` }]
-    };
-  }
-}
-
-/**
- * Unified email move handler with batch capability
- */
-async function handleEmailMove(args) {
-  const { emailIds, destinationFolderId, batch = false } = args;
-  
-  if (!emailIds || !destinationFolderId) {
-    return {
-      content: [{ 
-        type: "text", 
-        text: "Missing required parameters: emailIds and destinationFolderId" 
-      }]
-    };
-  }
-  
-  try {
-    const accessToken = await ensureAuthenticated();
-    
-    if (batch || emailIds.length > 5) {
-      return await batchMoveEmails(accessToken, { emailIds, destinationFolderId });
-    } else {
-      return await moveEmails(accessToken, { emailIds, destinationFolderId });
-    }
-  } catch (error) {
-    console.error('Error moving emails:', error);
-    return {
-      content: [{ type: "text", text: `Error moving emails: ${error.message}` }]
-    };
-  }
-}
-
-/**
- * Unified email folder handler
- */
-async function handleEmailFolder(args) {
-  const { operation, ...params } = args;
-  
-  if (!operation) {
-    return {
-      content: [{ 
-        type: "text", 
-        text: "Missing required parameter: operation. Valid operations are: list, create" 
-      }]
-    };
-  }
-  
-  try {
-    const accessToken = await ensureAuthenticated();
-    
-    switch (operation) {
-      case 'list':
-        return await listEmailFolders(accessToken);
-      case 'create':
-        return await createEmailFolder(accessToken, params);
-      default:
-        return {
-          content: [{ 
-            type: "text", 
-            text: `Invalid operation: ${operation}. Valid operations are: list, create` 
-          }]
-        };
-    }
-  } catch (error) {
-    console.error(`Error in email folder ${operation}:`, error);
-    return {
-      content: [{ type: "text", text: `Error in email folder: ${error.message}` }]
-    };
-  }
-}
-
-/**
- * Unified email rules handler
- */
-async function handleEmailRules(args) {
-  const { operation, enhanced = false, ...params } = args;
-  
-  if (!operation) {
-    return {
-      content: [{ 
-        type: "text", 
-        text: "Missing required parameter: operation. Valid operations are: list, create" 
-      }]
-    };
-  }
-  
-  try {
-    const accessToken = await ensureAuthenticated();
-    
-    switch (operation) {
-      case 'list':
-        return enhanced ? 
-          await listEmailRulesEnhanced(accessToken) : 
-          await listEmailRules(accessToken);
-      case 'create':
-        return enhanced ? 
-          await createEmailRuleEnhanced(accessToken, params) : 
-          await createEmailRule(accessToken, params);
-      default:
-        return {
-          content: [{ 
-            type: "text", 
-            text: `Invalid operation: ${operation}. Valid operations are: list, create` 
-          }]
-        };
-    }
-  } catch (error) {
-    console.error(`Error in email rules ${operation}:`, error);
-    return {
-      content: [{ type: "text", text: `Error in email rules: ${error.message}` }]
-    };
-  }
-}
-
-// Implementation functions (existing logic from original files)
-
 async function listEmails(accessToken, params) {
-  const { folderId, maxResults = 10 } = params;
-  
-  const endpoint = folderId ? 
-    `me/mailFolders/${folderId}/messages` : 
-    'me/messages';
-  
+  const { folderId, maxResults = 10, mailbox } = params;
+
+  const endpoint = folderId ?
+    `${config.getMailboxPrefix(mailbox)}/mailFolders/${folderId}/messages` :
+    `${config.getMailboxPrefix(mailbox)}/messages`;
+
   const queryParams = {
     $top: maxResults,
     $select: config.EMAIL_SELECT_FIELDS,
     $orderby: 'receivedDateTime desc'
   };
-  
+
   const response = await callGraphAPI(
     accessToken,
     'GET',
@@ -517,7 +104,7 @@ async function listEmails(accessToken, params) {
     null,
     queryParams
   );
-  
+
   if (!response.value || response.value.length === 0) {
     return {
       content: [{ type: "text", text: "No emails found." }]
@@ -541,35 +128,35 @@ async function listEmails(accessToken, params) {
 }
 
 async function readEmail(accessToken, params) {
-  const { emailId } = params;
-  
+  const { emailId, mailbox } = params;
+
   // Clean up old attachments periodically
   try {
     cleanupOldAttachments();
   } catch (err) {
     console.error('Error during attachment cleanup:', err);
   }
-  
+
   if (!emailId) {
     return {
-      content: [{ 
-        type: "text", 
-        text: "Missing required parameter: emailId" 
+      content: [{
+        type: "text",
+        text: "Missing required parameter: emailId"
       }]
     };
   }
-  
+
   const response = await callGraphAPI(
     accessToken,
     'GET',
-    `me/messages/${emailId}`,
+    `${config.getMailboxPrefix(mailbox)}/messages/${emailId}`,
     null,
     {
       $select: 'subject,from,toRecipients,ccRecipients,receivedDateTime,body,hasAttachments',
       $expand: 'attachments'
     }
   );
-  
+
   let emailContent = `Subject: ${response.subject}\n`;
   emailContent += `From: ${response.from.emailAddress.name} <${response.from.emailAddress.address}>\n`;
   emailContent += `To: ${response.toRecipients.map(r => `${r.emailAddress.name} <${r.emailAddress.address}>`).join(', ')}\n`;
@@ -579,19 +166,18 @@ async function readEmail(accessToken, params) {
   emailContent += `Date: ${new Date(response.receivedDateTime).toLocaleString()}\n`;
   emailContent += `Has Attachments: ${response.hasAttachments ? 'Yes' : 'No'}\n\n`;
   emailContent += `Body:\n${response.body.content}`;
-  
+
   // Process attachments if present
   if (response.attachments && response.attachments.length > 0) {
     emailContent += '\n\nAttachments:\n';
-    
+
     for (let i = 0; i < response.attachments.length; i++) {
       const attachment = response.attachments[i];
       emailContent += `${i + 1}. ${attachment.name}`;
-      
+
       // Handle reference attachments (SharePoint/OneDrive files)
       if (attachment['@odata.type'] === '#microsoft.graph.referenceAttachment' && attachment.sourceUrl) {
         try {
-          // Convert SharePoint URL to local path
           const localPath = convertSharePointUrlToLocal(attachment.sourceUrl);
           if (localPath) {
             emailContent += ` (SharePoint)\n   Local Path: ${localPath}\n   URL: ${attachment.sourceUrl}\n`;
@@ -602,14 +188,13 @@ async function readEmail(accessToken, params) {
           console.error('Error mapping SharePoint attachment:', err);
           emailContent += ` (SharePoint)\n   URL: ${attachment.sourceUrl}\n`;
         }
-      } 
+      }
       // Handle file attachments (embedded)
       else if (attachment['@odata.type'] === '#microsoft.graph.fileAttachment') {
         const sizeKB = attachment.size ? (attachment.size / 1024).toFixed(1) : 'Unknown';
-        
-        // Download attachment to temp directory
+
         const localPath = await downloadEmbeddedAttachment(attachment, emailId, accessToken);
-        
+
         if (localPath) {
           emailContent += ` (Embedded file - ${sizeKB} KB)\n`;
           emailContent += `   Type: ${attachment.contentType || 'Unknown'}\n`;
@@ -631,7 +216,7 @@ async function readEmail(accessToken, params) {
       }
     }
   }
-  
+
   return {
     content: [{ type: "text", text: emailContent }]
   };
@@ -639,7 +224,6 @@ async function readEmail(accessToken, params) {
 
 async function sendEmail(accessToken, params) {
   try {
-    // Basic validation
     if (!params || typeof params !== 'object') {
       return {
         content: [{
@@ -648,31 +232,28 @@ async function sendEmail(accessToken, params) {
         }]
       };
     }
-    
-    // Check required parameters exist
+
     if (!params.to || !params.subject || !params.body) {
       return {
-        content: [{ 
-          type: "text", 
-          text: "Missing required parameters: to, subject, and body" 
+        content: [{
+          type: "text",
+          text: "Missing required parameters: to, subject, and body"
         }]
       };
     }
-    
-    // Ensure 'to' is always an array
-    const toRecipients = Array.isArray(params.to) ? params.to : 
+
+    const toRecipients = Array.isArray(params.to) ? params.to :
                          (typeof params.to === 'string' ? [params.to] : []);
-    
+
     if (toRecipients.length === 0) {
       return {
-        content: [{ 
-          type: "text", 
-          text: "Invalid 'to' parameter. Please provide valid email address(es)." 
+        content: [{
+          type: "text",
+          text: "Invalid 'to' parameter. Please provide valid email address(es)."
         }]
       };
     }
-    
-    // Create message object with proper structure
+
     const message = {
       subject: params.subject,
       body: {
@@ -683,8 +264,13 @@ async function sendEmail(accessToken, params) {
         emailAddress: { address: email }
       }))
     };
-    
-    // Add CC/BCC if they exist
+
+    if (params.mailbox && params.mailbox !== 'me') {
+      message.from = {
+        emailAddress: { address: params.mailbox }
+      };
+    }
+
     if (params.cc) {
       const ccRecipients = Array.isArray(params.cc) ? params.cc : [params.cc];
       if (ccRecipients.length > 0) {
@@ -693,7 +279,7 @@ async function sendEmail(accessToken, params) {
         }));
       }
     }
-    
+
     if (params.bcc) {
       const bccRecipients = Array.isArray(params.bcc) ? params.bcc : [params.bcc];
       if (bccRecipients.length > 0) {
@@ -702,19 +288,19 @@ async function sendEmail(accessToken, params) {
         }));
       }
     }
-    
-    // Send the email with proper Microsoft Graph API format
+
+    const sendEndpoint = `${config.getMailboxPrefix(params.mailbox)}/sendMail`;
     await callGraphAPI(
       accessToken,
       'POST',
-      'me/sendMail',
+      sendEndpoint,
       {
         message: message,
         saveToSentItems: true
       },
       null
     );
-    
+
     return {
       content: [{ type: "text", text: "Email sent successfully!" }]
     };
@@ -726,39 +312,86 @@ async function sendEmail(accessToken, params) {
   }
 }
 
-// ============== DRAFT EMAIL FUNCTIONS ==============
-
-async function createDraft(accessToken, params) {
+async function replyToEmail(accessToken, params) {
   try {
-    // Validate parameters
-    if (!params.subject && !params.body && !params.to) {
+    if (!params || typeof params !== 'object') {
       return {
-        content: [{ 
-          type: "text", 
-          text: "At least one parameter required: subject, body, or to" 
+        content: [{
+          type: "text",
+          text: "Invalid parameters: expected an object with emailId and body"
         }]
       };
     }
-    
-    // Build draft message object
-    const draftMessage = {};
-    
-    if (params.subject) {
-      draftMessage.subject = params.subject;
+
+    if (!params.emailId || !params.body) {
+      return {
+        content: [{
+          type: "text",
+          text: "Missing required parameters: emailId and body. Use 'reply' to respond in-thread to an existing email."
+        }]
+      };
     }
-    
-    if (params.body) {
-      // Always use HTML content type for better formatting support
-      // Strip any CDATA wrappers if present
-      let bodyContent = params.body;
-      if (bodyContent.includes('<![CDATA[')) {
-        bodyContent = bodyContent.replace(/<!\[CDATA\[/g, '').replace(/\]\]>/g, '');
+
+    const replyPayload = {
+      message: {
+        body: {
+          contentType: "HTML",
+          content: params.body
+        }
       }
-      
-      // Ensure proper HTML structure with professional font styling
-      if (!bodyContent.includes('<html>')) {
-        // Add HTML wrapper with professional font family
-        bodyContent = `<html>
+    };
+
+    if (params.mailbox && params.mailbox !== 'me') {
+      replyPayload.message.from = {
+        emailAddress: { address: params.mailbox }
+      };
+    }
+
+    if (params.to) {
+      const toRecipients = Array.isArray(params.to) ? params.to : [params.to];
+      replyPayload.message.toRecipients = toRecipients.map(email => ({
+        emailAddress: { address: email }
+      }));
+    }
+
+    if (params.cc) {
+      const ccRecipients = Array.isArray(params.cc) ? params.cc : [params.cc];
+      replyPayload.message.ccRecipients = ccRecipients.map(email => ({
+        emailAddress: { address: email }
+      }));
+    }
+
+    const replyEndpoint = `${config.getMailboxPrefix(params.mailbox)}/messages/${params.emailId}/reply`;
+    await callGraphAPI(
+      accessToken,
+      'POST',
+      replyEndpoint,
+      replyPayload,
+      null
+    );
+
+    return {
+      content: [{ type: "text", text: "Reply sent successfully! The reply is threaded under the original email." }]
+    };
+  } catch (error) {
+    console.error('[EMAIL] Reply error:', error.message);
+    return {
+      content: [{ type: "text", text: `Email reply error: ${error.message}` }]
+    };
+  }
+}
+
+// ============== DRAFT EMAIL FUNCTIONS ==============
+
+function wrapHtmlBody(bodyContent) {
+  // Strip CDATA wrappers if present
+  if (bodyContent.includes('<![CDATA[')) {
+    bodyContent = bodyContent.replace(/<!\[CDATA\[/g, '').replace(/\]\]>/g, '');
+  }
+
+  // Ensure proper HTML structure with professional font styling
+  if (!bodyContent.includes('<html>')) {
+    bodyContent = `<html>
 <head>
 <style>
 body {
@@ -791,54 +424,73 @@ ul, ol {
 </head>
 <body>${bodyContent}</body>
 </html>`;
-      } else if (!bodyContent.includes('font-family') && !bodyContent.includes('Gulim')) {
-        // If HTML exists but no font specified, inject font style
-        bodyContent = bodyContent.replace('<body>', `<body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, Arial, sans-serif; font-size: 11pt; color: #333333;">`);
-      }
-      
-      // Replace any Gulim font references with professional fonts
-      bodyContent = bodyContent.replace(/font-family:\s*["']?Gulim["']?[^;]*/gi, "font-family: 'Segoe UI', Tahoma, Geneva, Verdana, Arial, sans-serif");
-      
-      draftMessage.body = {
-        contentType: "HTML",
-        content: bodyContent
+  } else if (!bodyContent.includes('font-family') && !bodyContent.includes('Gulim')) {
+    bodyContent = bodyContent.replace('<body>', `<body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, Arial, sans-serif; font-size: 11pt; color: #333333;">`);
+  }
+
+  // Replace any Gulim font references with professional fonts
+  bodyContent = bodyContent.replace(/font-family:\s*["']?Gulim["']?[^;]*/gi, "font-family: 'Segoe UI', Tahoma, Geneva, Verdana, Arial, sans-serif");
+
+  return bodyContent;
+}
+
+async function createDraft(accessToken, params) {
+  try {
+    if (!params.subject && !params.body && !params.to) {
+      return {
+        content: [{
+          type: "text",
+          text: "At least one parameter required: subject, body, or to"
+        }]
       };
     }
-    
+
+    const draftMessage = {};
+
+    if (params.subject) {
+      draftMessage.subject = params.subject;
+    }
+
+    if (params.body) {
+      draftMessage.body = {
+        contentType: "HTML",
+        content: wrapHtmlBody(params.body)
+      };
+    }
+
     if (params.to) {
       const toRecipients = Array.isArray(params.to) ? params.to : [params.to];
       draftMessage.toRecipients = toRecipients.map(email => ({
         emailAddress: { address: email }
       }));
     }
-    
+
     if (params.cc) {
       const ccRecipients = Array.isArray(params.cc) ? params.cc : [params.cc];
       draftMessage.ccRecipients = ccRecipients.map(email => ({
         emailAddress: { address: email }
       }));
     }
-    
+
     if (params.bcc) {
       const bccRecipients = Array.isArray(params.bcc) ? params.bcc : [params.bcc];
       draftMessage.bccRecipients = bccRecipients.map(email => ({
         emailAddress: { address: email }
       }));
     }
-    
-    // Create draft via Graph API
+
     const response = await callGraphAPI(
       accessToken,
       'POST',
-      'me/messages',
+      `${config.getMailboxPrefix(params.mailbox)}/messages`,
       draftMessage,
       null
     );
-    
+
     return {
-      content: [{ 
-        type: "text", 
-        text: `Draft created successfully!\nDraft ID: ${response.id}\nSubject: ${response.subject || '(No subject)'}` 
+      content: [{
+        type: "text",
+        text: `Draft created successfully!\nDraft ID: ${response.id}\nSubject: ${response.subject || '(No subject)'}`
       }]
     };
   } catch (error) {
@@ -851,116 +503,63 @@ ul, ol {
 
 async function updateDraft(accessToken, params) {
   try {
-    const { draftId, ...updateParams } = params;
-    
+    const { draftId, mailbox, ...updateParams } = params;
+
     if (!draftId) {
       return {
-        content: [{ 
-          type: "text", 
-          text: "Missing required parameter: draftId" 
+        content: [{
+          type: "text",
+          text: "Missing required parameter: draftId"
         }]
       };
     }
-    
-    // Build update object
+
     const updateMessage = {};
-    
+
     if (updateParams.subject) {
       updateMessage.subject = updateParams.subject;
     }
-    
+
     if (updateParams.body) {
-      // Always use HTML content type for better formatting support
-      // Strip any CDATA wrappers if present
-      let bodyContent = updateParams.body;
-      if (bodyContent.includes('<![CDATA[')) {
-        bodyContent = bodyContent.replace(/<!\[CDATA\[/g, '').replace(/\]\]>/g, '');
-      }
-      
-      // Ensure proper HTML structure with professional font styling
-      if (!bodyContent.includes('<html>')) {
-        // Add HTML wrapper with professional font family
-        bodyContent = `<html>
-<head>
-<style>
-body {
-  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, Arial, sans-serif;
-  font-size: 11pt;
-  color: #333333;
-}
-table {
-  border-collapse: collapse;
-  margin: 10px 0;
-}
-th, td {
-  border: 1px solid #ddd;
-  padding: 8px;
-  text-align: left;
-}
-th {
-  background-color: #f2f2f2;
-  font-weight: bold;
-}
-h3 {
-  color: #2c3e50;
-  margin-top: 15px;
-  margin-bottom: 10px;
-}
-ul, ol {
-  margin: 10px 0;
-}
-</style>
-</head>
-<body>${bodyContent}</body>
-</html>`;
-      } else if (!bodyContent.includes('font-family') && !bodyContent.includes('Gulim')) {
-        // If HTML exists but no font specified, inject font style
-        bodyContent = bodyContent.replace('<body>', `<body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, Arial, sans-serif; font-size: 11pt; color: #333333;">`);
-      }
-      
-      // Replace any Gulim font references with professional fonts
-      bodyContent = bodyContent.replace(/font-family:\s*["']?Gulim["']?[^;]*/gi, "font-family: 'Segoe UI', Tahoma, Geneva, Verdana, Arial, sans-serif");
-      
       updateMessage.body = {
         contentType: "HTML",
-        content: bodyContent
+        content: wrapHtmlBody(updateParams.body)
       };
     }
-    
+
     if (updateParams.to) {
       const toRecipients = Array.isArray(updateParams.to) ? updateParams.to : [updateParams.to];
       updateMessage.toRecipients = toRecipients.map(email => ({
         emailAddress: { address: email }
       }));
     }
-    
+
     if (updateParams.cc) {
       const ccRecipients = Array.isArray(updateParams.cc) ? updateParams.cc : [updateParams.cc];
       updateMessage.ccRecipients = ccRecipients.map(email => ({
         emailAddress: { address: email }
       }));
     }
-    
+
     if (updateParams.bcc) {
       const bccRecipients = Array.isArray(updateParams.bcc) ? updateParams.bcc : [updateParams.bcc];
       updateMessage.bccRecipients = bccRecipients.map(email => ({
         emailAddress: { address: email }
       }));
     }
-    
-    // Update draft via Graph API
+
     const response = await callGraphAPI(
       accessToken,
       'PATCH',
-      `me/messages/${draftId}`,
+      `${config.getMailboxPrefix(mailbox)}/messages/${draftId}`,
       updateMessage,
       null
     );
-    
+
     return {
-      content: [{ 
-        type: "text", 
-        text: `Draft updated successfully!\nDraft ID: ${response.id}\nSubject: ${response.subject || '(No subject)'}` 
+      content: [{
+        type: "text",
+        text: `Draft updated successfully!\nDraft ID: ${response.id}\nSubject: ${response.subject || '(No subject)'}`
       }]
     };
   } catch (error) {
@@ -973,30 +572,29 @@ ul, ol {
 
 async function sendDraft(accessToken, params) {
   try {
-    const { draftId } = params;
-    
+    const { draftId, mailbox } = params;
+
     if (!draftId) {
       return {
-        content: [{ 
-          type: "text", 
-          text: "Missing required parameter: draftId" 
+        content: [{
+          type: "text",
+          text: "Missing required parameter: draftId"
         }]
       };
     }
-    
-    // Send draft via Graph API - no body needed for this endpoint
+
     await callGraphAPI(
       accessToken,
       'POST',
-      `me/messages/${draftId}/send`,
+      `${config.getMailboxPrefix(mailbox)}/messages/${draftId}/send`,
       null,
       null
     );
-    
+
     return {
-      content: [{ 
-        type: "text", 
-        text: "Draft sent successfully! The message has been moved to your Sent Items folder." 
+      content: [{
+        type: "text",
+        text: "Draft sent successfully! The message has been moved to your Sent Items folder."
       }]
     };
   } catch (error) {
@@ -1009,29 +607,28 @@ async function sendDraft(accessToken, params) {
 
 async function listDrafts(accessToken, params) {
   try {
-    const { maxResults = 10 } = params;
-    
+    const { maxResults = 10, mailbox } = params;
+
     const queryParams = {
       $top: maxResults,
       $select: config.EMAIL_SELECT_FIELDS,
       $orderby: 'lastModifiedDateTime desc'
     };
-    
-    // Get drafts from the Drafts folder
+
     const response = await callGraphAPI(
       accessToken,
       'GET',
-      'me/mailFolders/drafts/messages',
+      `${config.getMailboxPrefix(mailbox)}/mailFolders/drafts/messages`,
       null,
       queryParams
     );
-    
+
     if (!response.value || response.value.length === 0) {
       return {
         content: [{ type: "text", text: "No drafts found." }]
       };
     }
-    
+
     const draftsList = response.value.map((draft, index) => {
       const toRecipients = draft.toRecipients?.map(r => r.emailAddress.address).join(', ') || '(No recipients)';
       const attachments = draft.hasAttachments ? ' 📎' : '';
@@ -1040,11 +637,11 @@ async function listDrafts(accessToken, params) {
    Modified: ${new Date(draft.lastModifiedDateTime).toLocaleString()}
    ID: ${draft.id}`;
     }).join('\n\n');
-    
+
     return {
-      content: [{ 
-        type: "text", 
-        text: `Found ${response.value.length} drafts:\n\n${draftsList}` 
+      content: [{
+        type: "text",
+        text: `Found ${response.value.length} drafts:\n\n${draftsList}`
       }]
     };
   } catch (error) {
@@ -1055,1425 +652,174 @@ async function listDrafts(accessToken, params) {
   }
 }
 
-// ============== NEW UNIFIED SEARCH HELPER FUNCTIONS ==============
+// ============== UNIFIED MAIL ROUTER ==============
 
 /**
- * Convert folder name to folder ID
+ * Unified mail handler - single entry point for ALL email operations
  */
-async function getFolderIdByName(accessToken, folderName) {
-  // Check well-known folder names first
-  const wellKnownFolders = {
-    'inbox': 'inbox',
-    'sent': 'sentitems',
-    'sent items': 'sentitems', 
-    'drafts': 'drafts',
-    'deleted': 'deleteditems',
-    'deleted items': 'deleteditems',
-    'junk': 'junkemail',
-    'junk email': 'junkemail',
-    'archive': 'archive'
-  };
-  
-  const lowerName = folderName.toLowerCase();
-  if (wellKnownFolders[lowerName]) {
-    return wellKnownFolders[lowerName];
-  }
-  
-  // Search for custom folder by name
-  try {
-    const response = await callGraphAPI(
-      accessToken,
-      'GET',
-      'me/mailFolders',
-      null,
-      { 
-        $filter: `displayName eq '${folderName}'`,
-        $select: 'id,displayName'
-      }
-    );
-    
-    if (response.value && response.value.length > 0) {
-      return response.value[0].id;
-    }
-  } catch (error) {
-    console.error(`Error finding folder by name: ${error.message}`);
-  }
-  
-  return null;
-}
-
-/**
- * Build KQL query from parameters
- */
-function buildKQLQuery(params) {
-  let kql = [];
-
-  // Skip empty queries entirely
-  if (!params.query || params.query === '' || params.query.trim() === '') {
-    // Don't add any query term for empty queries
-  } else if (isKQLFormat(params.query)) {
-    // Check if query is already in KQL format
-    kql.push(params.query);
-  } else if (params.query !== '*') {
-    // Convert natural language to KQL - search in subject, body, and from
-    // Don't generate KQL for wildcard
-    kql.push(`(subject:"${params.query}" OR body:"${params.query}" OR from:"${params.query}")`);
-  }
-  
-  // Add filters
-  if (params.from) {
-    kql.push(`from:${params.from}`);
-  }
-  if (params.to) {
-    kql.push(`to:${params.to}`);
-  }
-  if (params.subject && !isKQLFormat(params.query)) {
-    kql.push(`subject:"${params.subject}"`);
-  }
-  if (params.hasAttachments !== undefined) {
-    kql.push(`hasattachment:${params.hasAttachments}`);
-  }
-  if (params.isRead !== undefined) {
-    kql.push(`isread:${params.isRead}`);
-  }
-  if (params.importance) {
-    kql.push(`importance:${params.importance}`);
-  }
-  
-  // Date ranges
-  if (params.startDate) {
-    const date = parseRelativeDate(params.startDate);
-    kql.push(`received>=${date}`);
-  }
-  if (params.endDate) {
-    const date = parseRelativeDate(params.endDate);
-    kql.push(`received<=${date}`);
-  }
-  
-  return kql.length > 0 ? kql.join(' AND ') : '';
-}
-
-/**
- * Check if query contains KQL operators
- */
-function isKQLFormat(query) {
-  // Check for KQL operators
-  const kqlOperators = [
-    ':',      // Property separator
-    ' AND ',  // Boolean AND
-    ' OR ',   // Boolean OR
-    ' NOT ',  // Boolean NOT
-    'from:',
-    'to:',
-    'subject:',
-    'body:',
-    'hasattachment:',
-    'isread:',
-    'importance:',
-    'received:'
-  ];
-
-  // Also check for OR/AND/NOT at the beginning of the query
-  const kqlPatterns = [
-    /^OR\s+/i,    // OR at start
-    /^AND\s+/i,   // AND at start
-    /^NOT\s+/i,   // NOT at start
-    /\sOR\s+/i,   // OR with spaces
-    /\sAND\s+/i,  // AND with spaces
-    /\sNOT\s+/i   // NOT with spaces
-  ];
-
-  return kqlOperators.some(op => query.includes(op)) ||
-         kqlPatterns.some(pattern => pattern.test(query));
-}
-
-/**
- * Check if query is complex enough to warrant Microsoft Search API
- */
-function isComplexKQLQuery(query) {
-  // Complex queries have multiple operators or date ranges
-  const operatorCount = (query.match(/ AND | OR | NOT /g) || []).length;
-  const hasDateRange = query.includes('received>=') || query.includes('received<=');
-  const hasMultipleFilters = (query.match(/:/g) || []).length > 2;
-  
-  return operatorCount > 1 || hasDateRange || hasMultipleFilters;
-}
-
-/**
- * Parse relative date strings like '7d', '1w', '1m', '1y'
- */
-function parseRelativeDate(dateStr) {
-  // If already ISO format, return as-is
-  if (dateStr.match(/^\d{4}-\d{2}-\d{2}/)) {
-    return dateStr;
-  }
-  
-  // Handle relative dates
-  if (dateStr.match(/^\d+[dwmy]$/)) {
-    const num = parseInt(dateStr);
-    const unit = dateStr.slice(-1);
-    const date = new Date();
-    
-    switch(unit) {
-      case 'd': // days
-        date.setDate(date.getDate() - num);
-        break;
-      case 'w': // weeks
-        date.setDate(date.getDate() - (num * 7));
-        break;
-      case 'm': // months
-        date.setMonth(date.getMonth() - num);
-        break;
-      case 'y': // years
-        date.setFullYear(date.getFullYear() - num);
-        break;
-    }
-    
-    return date.toISOString().split('T')[0];
-  }
-  
-  return dateStr;
-}
-
-/**
- * Search using Microsoft Search API for relevance ranking
- */
-async function searchUsingMicrosoftSearchAPI(accessToken, params) {
-  const { query, maxResults, useRelevance, includeDeleted } = params;
-  
-  const searchPayload = {
-    requests: [
-      {
-        entityTypes: ["message"],
-        query: {
-          queryString: query
-        },
-        from: 0,
-        size: Math.min(maxResults, 1000),
-        fields: ["subject", "from", "toRecipients", "receivedDateTime", "hasAttachments", "id", "bodyPreview", "importance", "isRead"],
-        enableTopResults: useRelevance
-      }
-    ]
-  };
-  
-  const response = await callGraphAPI(
-    accessToken,
-    'POST',
-    'search/query',
-    searchPayload
-  );
-  
-  const hits = response.value[0]?.hitsContainers[0]?.hits || [];
-  
-  if (hits.length === 0) {
+async function handleMail(args) {
+  if (!args || typeof args !== 'object') {
     return {
-      content: [{ type: "text", text: "No emails found matching your search." }]
-    };
-  }
-  
-  const emailsList = hits.map(hit => {
-    const resource = hit.resource;
-    const attachments = resource.hasAttachments ? ' 📎' : '';
-    const emailId = resource.id || hit.hitId || 'Not available';
-    const fromAddress = resource.from?.emailAddress?.address || resource.from || 'Unknown sender';
-    const importance = resource.importance ? ` [${resource.importance}]` : '';
-    const unread = resource.isRead === false ? ' *' : '';
-    
-    return `- ${resource.subject}${attachments}${importance}${unread}\n  From: ${fromAddress}\n  Date: ${new Date(resource.receivedDateTime).toLocaleString()}\n  ID: ${emailId}\n`;
-  }).join('\n');
-  
-  const sortNote = useRelevance ? ' (sorted by relevance)' : ' (sorted by date)';
-  
-  return {
-    content: [{ 
-      type: "text", 
-      text: `Found ${hits.length} emails${sortNote}:\n\n${emailsList}` 
-    }]
-  };
-}
-
-/**
- * Search using Graph API $search parameter
- */
-async function searchUsingGraphSearch(accessToken, params) {
-  const { query, endpoint, maxResults } = params;
-  
-  const queryParams = {
-    $search: `"${query}"`,
-    $top: Math.min(maxResults, 250),
-    $select: config.EMAIL_SELECT_FIELDS
-    // Note: $orderby cannot be used with $search
-  };
-  
-  const response = await callGraphAPI(
-    accessToken,
-    'GET',
-    endpoint,
-    null,
-    queryParams
-  );
-  
-  if (!response.value || response.value.length === 0) {
-    console.error('Graph $search returned 0 results, falling back to $filter');
-    // Don't return, fall through to let handler try $filter
-    throw new Error('No results from $search, trigger fallback');
-  }
-  
-  const emailsList = response.value.map(email => {
-    const attachments = email.hasAttachments ? ' 📎' : '';
-    const importance = email.importance !== 'normal' ? ` [${email.importance}]` : '';
-    const unread = !email.isRead ? ' *' : '';
-    const fromAddress = email.from?.emailAddress?.address || email.from?.address || 'Unknown sender';
-
-    return `- ${email.subject || '(No subject)'}${attachments}${importance}${unread}\n  From: ${fromAddress}\n  Date: ${new Date(email.receivedDateTime).toLocaleString()}\n  ID: ${email.id}\n`;
-  }).join('\n');
-  
-  return {
-    content: [{ 
-      type: "text", 
-      text: `Found ${response.value.length} emails:\n\n${emailsList}` 
-    }]
-  };
-}
-
-/**
- * Search using $filter parameter (most reliable fallback)
- */
-async function searchUsingFilter(accessToken, params) {
-  const { 
-    query, 
-    from, 
-    to, 
-    subject, 
-    hasAttachments, 
-    isRead, 
-    importance, 
-    startDate, 
-    endDate, 
-    endpoint, 
-    maxResults 
-  } = params;
-  
-  let filters = [];
-
-  // Build filter conditions
-  if (query && query !== '' && query !== '*' && !from && !subject) {
-    // Simple text search in subject only (bodyPreview doesn't support filtering)
-    filters.push(`contains(subject, '${query}')`);
-  }
-
-  if (from) {
-    filters.push(`from/emailAddress/address eq '${from}'`);
-  }
-
-  if (to) {
-    filters.push(`toRecipients/any(r: r/emailAddress/address eq '${to}')`);
-  }
-
-  if (subject) {
-    filters.push(`contains(subject, '${subject}')`);
-  }
-
-  if (hasAttachments !== undefined) {
-    filters.push(`hasAttachments eq ${hasAttachments ? 'true' : 'false'}`);
-  }
-
-  if (isRead !== undefined) {
-    filters.push(`isRead eq ${isRead ? 'true' : 'false'}`);
-  }
-
-  if (importance) {
-    filters.push(`importance eq '${importance}'`);
-  }
-  
-  // Determine correct date field based on folder
-  // Note: sentDateTime requires different API handling, for now use receivedDateTime for all
-  const dateField = 'receivedDateTime';
-  
-  if (startDate) {
-    const date = parseRelativeDate(startDate);
-    filters.push(`${dateField} ge ${date}T00:00:00Z`);
-  }
-  
-  if (endDate) {
-    const date = parseRelativeDate(endDate);
-    filters.push(`${dateField} le ${date}T23:59:59Z`);
-  }
-  
-  const filterQuery = filters.length > 0 ? filters.join(' and ') : null;
-
-  // Determine if we should include $orderby based on filter complexity
-  // MS Graph API requires orderby properties to appear in filter in correct order
-  // To avoid "restriction or sort order is too complex" errors, we skip orderby for complex filters
-  const hasDateFilter = (startDate || endDate);
-  const hasMultipleFilters = filters.length > 1;
-  const hasFolderSpecificEndpoint = endpoint && endpoint.includes('mailFolders');
-
-  // Skip orderby when using folder-specific endpoints with any filters to avoid complexity errors
-  // Only use orderby for non-folder searches or folder searches without filters
-  const shouldIncludeOrderBy = !hasFolderSpecificEndpoint || filters.length === 0;
-
-  const queryParams = {
-    $top: Math.min(maxResults, 250),
-    $select: config.EMAIL_SELECT_FIELDS
-  };
-
-  if (shouldIncludeOrderBy) {
-    queryParams.$orderby = 'receivedDateTime desc';
-  }
-
-  if (filterQuery) {
-    queryParams.$filter = filterQuery;
-  }
-  
-  const response = await callGraphAPI(
-    accessToken,
-    'GET',
-    endpoint,
-    null,
-    queryParams
-  );
-  
-  if (!response.value || response.value.length === 0) {
-    return {
-      content: [{ type: "text", text: "No emails found matching your search." }]
-    };
-  }
-  
-  const emailsList = response.value.map(email => {
-    const attachments = email.hasAttachments ? ' 📎' : '';
-    const importance = email.importance !== 'normal' ? ` [${email.importance}]` : '';
-    const unread = !email.isRead ? ' *' : '';
-    const fromAddress = email.from?.emailAddress?.address || email.from?.address || 'Unknown sender';
-
-    return `- ${email.subject || '(No subject)'}${attachments}${importance}${unread}\n  From: ${fromAddress}\n  Date: ${new Date(email.receivedDateTime).toLocaleString()}\n  ID: ${email.id}\n`;
-  }).join('\n');
-  
-  return {
-    content: [{ 
-      type: "text", 
-      text: `Found ${response.value.length} emails (using filter fallback):\n\n${emailsList}` 
-    }]
-  };
-}
-
-// ============== ORIGINAL SEARCH FUNCTIONS (DEPRECATED) ==============
-
-async function searchEmailsBasic(accessToken, params) {
-  const { query, from, subject, maxResults } = params;
-  
-  let searchQuery = query;
-  if (from) searchQuery = `from:${from} AND ${searchQuery}`;
-  if (subject) searchQuery = `subject:${subject} AND ${searchQuery}`;
-  
-  const queryParams = {
-    $search: `"${searchQuery}"`,
-    $top: maxResults,
-    $select: config.EMAIL_SELECT_FIELDS
-    // Note: $orderby cannot be used with $search - results are automatically sorted by sentDateTime
-  };
-  
-  const response = await callGraphAPI(
-    accessToken,
-    'GET',
-    'me/messages',
-    null,
-    queryParams
-  );
-  
-  if (!response.value || response.value.length === 0) {
-    return {
-      content: [{ type: "text", text: "No emails found matching your search." }]
-    };
-  }
-  
-  const emailsList = response.value.map(email => {
-    const attachments = email.hasAttachments ? ' 📎' : '';
-    const fromAddress = email.from?.emailAddress?.address || email.from?.address || 'Unknown sender';
-    return `- ${email.subject || '(No subject)'}${attachments}\n  From: ${fromAddress}\n  Date: ${new Date(email.receivedDateTime).toLocaleString()}\n  ID: ${email.id}\n`;
-  }).join('\n');
-  
-  return {
-    content: [{ 
-      type: "text", 
-      text: `Found ${response.value.length} emails:\n\n${emailsList}` 
-    }]
-  };
-}
-
-async function searchEmailsEnhanced(accessToken, params) {
-  const { query, maxResults } = params;
-  
-  const searchPayload = {
-    requests: [
-      {
-        entityTypes: ["message"],
-        query: {
-          queryString: query
-        },
-        size: maxResults,
-        fields: ["subject", "from", "receivedDateTime", "hasAttachments", "id"]
-      }
-    ]
-  };
-  
-  try {
-    const response = await callGraphAPI(
-      accessToken,
-      'POST',
-      'search/query',
-      searchPayload
-    );
-    
-    const hits = response.value[0]?.hitsContainers[0]?.hits || [];
-    
-    if (hits.length === 0) {
-      return {
-        content: [{ type: "text", text: "No emails found matching your search." }]
-      };
-    }
-    
-    const emailsList = hits.map(hit => {
-      const resource = hit.resource;
-      const attachments = resource.hasAttachments ? ' 📎' : '';
-      // Microsoft Search API may return ID in different formats
-      const emailId = resource.id || hit.hitId || 'Not available';
-      const fromAddress = resource.from?.emailAddress?.address || resource.from || 'Unknown sender';
-      return `- ${resource.subject}${attachments}\n  From: ${fromAddress}\n  Date: ${new Date(resource.receivedDateTime).toLocaleString()}\n  ID: ${emailId}\n`;
-    }).join('\n');
-    
-    return {
-      content: [{ 
-        type: "text", 
-        text: `Found ${hits.length} emails using enhanced search:\n\n${emailsList}` 
-      }]
-    };
-  } catch (error) {
-    // Fall back to basic search if enhanced search fails
-    return await searchEmailsBasic(accessToken, params);
-  }
-}
-
-async function searchEmailsSimple(accessToken, params) {
-  const { query, filterType = 'subject', maxResults } = params;
-  
-  let filterQuery;
-  switch (filterType) {
-    case 'from':
-      filterQuery = `from/emailAddress/address eq '${query}'`;
-      break;
-    case 'body':
-      filterQuery = `contains(body/content, '${query}')`;
-      break;
-    case 'subject':
-    default:
-      filterQuery = `contains(subject, '${query}')`;
-      break;
-  }
-  
-  const queryParams = {
-    $filter: filterQuery,
-    $top: maxResults,
-    $select: config.EMAIL_SELECT_FIELDS,
-    $orderby: 'receivedDateTime desc'
-  };
-  
-  const response = await callGraphAPI(
-    accessToken,
-    'GET',
-    'me/messages',
-    null,
-    queryParams
-  );
-  
-  if (!response.value || response.value.length === 0) {
-    return {
-      content: [{ type: "text", text: "No emails found matching your search." }]
-    };
-  }
-  
-  const emailsList = response.value.map(email => {
-    const attachments = email.hasAttachments ? ' 📎' : '';
-    const fromAddress = email.from?.emailAddress?.address || email.from?.address || 'Unknown sender';
-    return `- ${email.subject || '(No subject)'}${attachments}\n  From: ${fromAddress}\n  Date: ${new Date(email.receivedDateTime).toLocaleString()}\n  ID: ${email.id}\n`;
-  }).join('\n');
-  
-  return {
-    content: [{ 
-      type: "text", 
-      text: `Found ${response.value.length} emails:\n\n${emailsList}` 
-    }]
-  };
-}
-
-async function moveEmails(accessToken, params) {
-  const { emailIds, destinationFolderId } = params;
-  
-  const results = [];
-  
-  for (const emailId of emailIds) {
-    try {
-      await callGraphAPI(
-        accessToken,
-        'POST',
-        `me/messages/${emailId}/move`,
-        { destinationId: destinationFolderId }
-      );
-      results.push({ emailId, status: 'success' });
-    } catch (error) {
-      results.push({ emailId, status: 'failed', error: error.message });
-    }
-  }
-  
-  const successCount = results.filter(r => r.status === 'success').length;
-  const failureCount = results.filter(r => r.status === 'failed').length;
-  
-  let message = `Moved ${successCount} emails successfully.`;
-  if (failureCount > 0) {
-    message += ` ${failureCount} emails failed to move.`;
-  }
-  
-  return {
-    content: [{ type: "text", text: message }]
-  };
-}
-
-async function batchMoveEmails(accessToken, params) {
-  const { emailIds, destinationFolderId } = params;
-  
-  const batchSize = 20;
-  const results = [];
-  
-  for (let i = 0; i < emailIds.length; i += batchSize) {
-    const batch = emailIds.slice(i, i + batchSize);
-    const requests = batch.map((emailId, index) => ({
-      id: `${index}`,
-      method: 'POST',
-      url: `/me/messages/${emailId}/move`,
-      body: { destinationId: destinationFolderId },
-      headers: { 'Content-Type': 'application/json' }
-    }));
-    
-    try {
-      const batchResponse = await callGraphAPI(
-        accessToken,
-        'POST',
-        '$batch',
-        { requests }
-      );
-      
-      batchResponse.responses.forEach((response, index) => {
-        // Email move operations return 201 (Created) on success
-        if (response.status === 200 || response.status === 201) {
-          results.push({ emailId: batch[index], status: 'success' });
-        } else {
-          results.push({ 
-            emailId: batch[index], 
-            status: 'failed', 
-            error: response.body?.error?.message || 'Unknown error' 
-          });
-        }
-      });
-    } catch (error) {
-      batch.forEach(emailId => {
-        results.push({ emailId, status: 'failed', error: error.message });
-      });
-    }
-  }
-  
-  const successCount = results.filter(r => r.status === 'success').length;
-  const failureCount = results.filter(r => r.status === 'failed').length;
-  
-  let message = `Batch moved ${successCount} emails successfully.`;
-  if (failureCount > 0) {
-    message += ` ${failureCount} emails failed to move.`;
-  }
-  
-  return {
-    content: [{ type: "text", text: message }]
-  };
-}
-
-async function listEmailRules(accessToken) {
-  const response = await callGraphAPI(
-    accessToken,
-    'GET',
-    'me/mailFolders/inbox/messageRules'
-  );
-  
-  if (!response.value || response.value.length === 0) {
-    return {
-      content: [{ type: "text", text: "No email rules found." }]
-    };
-  }
-  
-  const rulesList = response.value.map((rule, index) => {
-    return `${index + 1}. ${rule.displayName}\n   Enabled: ${rule.isEnabled}\n   ID: ${rule.id}\n`;
-  }).join('\n');
-  
-  return {
-    content: [{ 
-      type: "text", 
-      text: `Found ${response.value.length} email rules:\n\n${rulesList}` 
-    }]
-  };
-}
-
-async function listEmailRulesEnhanced(accessToken) {
-  const response = await callGraphAPI(
-    accessToken,
-    'GET',
-    'me/mailFolders/inbox/messageRules'
-  );
-  
-  if (!response.value || response.value.length === 0) {
-    return {
-      content: [{ type: "text", text: "No email rules found." }]
-    };
-  }
-  
-  const rulesList = response.value.map((rule, index) => {
-    let details = `${index + 1}. ${rule.displayName}\n`;
-    details += `   Enabled: ${rule.isEnabled}\n`;
-    details += `   ID: ${rule.id}\n`;
-    
-    if (rule.conditions?.fromAddresses?.length > 0) {
-      details += `   From: ${rule.conditions.fromAddresses.map(a => a.emailAddress.address).join(', ')}\n`;
-    }
-    
-    if (rule.actions?.moveToFolder) {
-      details += `   Action: Move to folder ${rule.actions.moveToFolder}\n`;
-    }
-    
-    return details;
-  }).join('\n');
-  
-  return {
-    content: [{ 
-      type: "text", 
-      text: `Found ${response.value.length} email rules (enhanced view):\n\n${rulesList}` 
-    }]
-  };
-}
-
-async function createEmailRule(accessToken, params) {
-  const { displayName, fromAddresses, moveToFolder, forwardTo } = params;
-  
-  if (!displayName) {
-    return {
-      content: [{ 
-        type: "text", 
-        text: "Missing required parameter: displayName" 
+      content: [{
+        type: "text",
+        text: "Invalid args: expected an object with 'operation' parameter"
       }]
     };
   }
-  
-  const rule = {
-    displayName,
-    sequence: 1,
-    isEnabled: true,
-    conditions: {},
-    actions: {}
-  };
-  
-  if (fromAddresses && fromAddresses.length > 0) {
-    rule.conditions.fromAddresses = fromAddresses.map(email => ({
-      emailAddress: { address: email }
-    }));
-  }
-  
-  if (moveToFolder) {
-    rule.actions.moveToFolder = moveToFolder;
-  }
-  
-  if (forwardTo && forwardTo.length > 0) {
-    rule.actions.forwardTo = forwardTo.map(email => ({
-      emailAddress: { address: email }
-    }));
-  }
-  
-  const response = await callGraphAPI(
-    accessToken,
-    'POST',
-    'me/mailFolders/inbox/messageRules',
-    rule
-  );
-  
-  return {
-    content: [{ 
-      type: "text", 
-      text: `Email rule created successfully!\nRule ID: ${response.id}` 
-    }]
-  };
-}
 
-async function createEmailRuleEnhanced(accessToken, params) {
-  const { displayName, fromAddresses, moveToFolder, forwardTo, subjectContains, importance } = params;
-  
-  if (!displayName) {
-    return {
-      content: [{ 
-        type: "text", 
-        text: "Missing required parameter: displayName" 
-      }]
-    };
-  }
-  
-  const rule = {
-    displayName,
-    sequence: 1,
-    isEnabled: true,
-    conditions: {},
-    actions: {}
-  };
-  
-  if (fromAddresses && fromAddresses.length > 0) {
-    rule.conditions.fromAddresses = fromAddresses.map(email => ({
-      name: email,
-      address: email
-    }));
-  }
-  
-  if (subjectContains && subjectContains.length > 0) {
-    rule.conditions.subjectContains = subjectContains;
-  }
-  
-  if (importance) {
-    rule.conditions.importance = importance;
-  }
-  
-  if (moveToFolder) {
-    rule.actions.moveToFolder = moveToFolder;
-  }
-  
-  if (forwardTo && forwardTo.length > 0) {
-    rule.actions.forwardTo = forwardTo.map(email => ({
-      emailAddress: { 
-        name: email,
-        address: email 
-      }
-    }));
-  }
-  
-  const response = await callGraphAPI(
-    accessToken,
-    'POST',
-    'me/mailFolders/inbox/messageRules',
-    rule
-  );
-  
-  return {
-    content: [{ 
-      type: "text", 
-      text: `Enhanced email rule created successfully!\nRule ID: ${response.id}` 
-    }]
-  };
-}
-
-// Folder operation implementations
-async function listEmailFolders(accessToken) {
-  const response = await callGraphAPI(
-    accessToken,
-    'GET',
-    'me/mailFolders',
-    null,
-    {
-      $top: 100,
-      $select: 'id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount'
-    }
-  );
-  
-  if (!response.value || response.value.length === 0) {
-    return {
-      content: [{ type: "text", text: "No email folders found." }]
-    };
-  }
-  
-  const foldersList = response.value
-    .filter(folder => folder.displayName !== 'Conversation History')
-    .map((folder, index) => {
-      return `${index + 1}. ${folder.displayName}\n   ID: ${folder.id}\n   Messages: ${folder.totalItemCount} (${folder.unreadItemCount} unread)\n`;
-    }).join('\n');
-  
-  return {
-    content: [{ 
-      type: "text", 
-      text: `Found ${response.value.length} email folders:\n\n${foldersList}` 
-    }]
-  };
-}
-
-async function createEmailFolder(accessToken, params) {
-  const { displayName, parentFolderId } = params;
-  
-  if (!displayName) {
-    return {
-      content: [{ 
-        type: "text", 
-        text: "Missing required parameter: displayName" 
-      }]
-    };
-  }
-  
-  const endpoint = parentFolderId
-    ? `me/mailFolders/${parentFolderId}/childFolders`
-    : 'me/mailFolders';
-  
-  const folderData = { displayName };
-  
-  const response = await callGraphAPI(
-    accessToken,
-    'POST',
-    endpoint,
-    folderData
-  );
-  
-  return {
-    content: [{ 
-      type: "text", 
-      text: `Email folder created successfully!\nFolder ID: ${response.id}` 
-    }]
-  };
-}
-
-/**
- * Get focused inbox messages
- */
-async function getFocusedInbox(accessToken, params) {
-  const { maxResults = 25 } = params;
-  
-  const queryParams = {
-    $filter: 'inferenceClassification eq \'Focused\'',
-    $select: config.EMAIL_SELECT_FIELDS,
-    $orderby: 'receivedDateTime DESC',
-    $top: maxResults
-  };
-  
-  const response = await callGraphAPI(
-    accessToken,
-    'GET',
-    'me/messages',
-    null,
-    queryParams
-  );
-  
-  if (!response.value || response.value.length === 0) {
-    return {
-      content: [{ type: "text", text: "No focused messages found." }]
-    };
-  }
-  
-  const messagesList = response.value.map((msg, index) => {
-    return `${index + 1}. ${msg.subject}
-   From: ${msg.from?.emailAddress?.address || 'N/A'}
-   Date: ${new Date(msg.receivedDateTime).toLocaleString()}
-   Preview: ${msg.bodyPreview?.substring(0, 100)}...
-   Has Attachments: ${msg.hasAttachments ? 'Yes' : 'No'}
-   ID: ${msg.id}`;
-  }).join('\n\n');
-  
-  return {
-    content: [{ 
-      type: "text", 
-      text: `Found ${response.value.length} focused messages:\n\n${messagesList}` 
-    }]
-  };
-}
-
-/**
- * Manage email categories
- */
-async function handleEmailCategories(args) {
   const { operation, ...params } = args;
-  
+
   if (!operation) {
     return {
-      content: [{ 
-        type: "text", 
-        text: "Missing required parameter: operation. Valid operations are: list, create, update, delete, apply, remove" 
+      content: [{
+        type: "text",
+        text: "Missing required parameter: operation. Valid operations: list, read, send, reply, draft, update_draft, send_draft, list_drafts, search, move, list_folders, create_folder, list_rules, create_rule, focused, list_categories, create_category, apply_category, remove_category"
       }]
     };
   }
-  
+
   try {
-    const accessToken = await ensureAuthenticated();
-    
     switch (operation) {
+      // Core email operations
       case 'list':
-        return await listCategories(accessToken);
-      case 'create':
-        return await createCategory(accessToken, params);
-      case 'update':
-        return await updateCategory(accessToken, params);
-      case 'delete':
-        return await deleteCategory(accessToken, params);
-      case 'apply':
-        return await applyCategory(accessToken, params);
-      case 'remove':
-        return await removeCategory(accessToken, params);
+      case 'read':
+      case 'send':
+      case 'reply':
+      case 'draft':
+      case 'update_draft':
+      case 'send_draft':
+      case 'list_drafts':
+        return await handleEmail(args);
+
+      // Search
+      case 'search':
+        return await handleEmailSearch(params);
+
+      // Move
+      case 'move':
+        return await handleEmailMove(params);
+
+      // Folder operations
+      case 'list_folders':
+        return await handleEmailFolder({ operation: 'list', ...params });
+      case 'create_folder':
+        return await handleEmailFolder({ operation: 'create', ...params });
+
+      // Rules operations
+      case 'list_rules':
+        return await handleEmailRules({ operation: 'list', ...params });
+      case 'create_rule':
+        return await handleEmailRules({ operation: 'create', ...params });
+
+      // Focused inbox
+      case 'focused': {
+        const accessToken = await ensureAuthenticated();
+        return await getFocusedInbox(accessToken, params);
+      }
+
+      // Categories operations
+      case 'list_categories':
+        return await handleEmailCategories({ operation: 'list', ...params });
+      case 'create_category':
+        return await handleEmailCategories({ operation: 'create', ...params });
+      case 'apply_category':
+        return await handleEmailCategories({ operation: 'apply', ...params });
+      case 'remove_category':
+        return await handleEmailCategories({ operation: 'remove', ...params });
+
       default:
         return {
-          content: [{ 
-            type: "text", 
-            text: `Invalid operation: ${operation}` 
+          content: [{
+            type: "text",
+            text: `Invalid operation: ${operation}. Valid operations: list, read, send, reply, draft, update_draft, send_draft, list_drafts, search, move, list_folders, create_folder, list_rules, create_rule, focused, list_categories, create_category, apply_category, remove_category`
           }]
         };
     }
   } catch (error) {
-    console.error(`Error in categories ${operation}:`, error);
+    console.error(`Error in mail ${operation}:`, error);
     return {
-      content: [{ type: "text", text: `Error: ${error.message}` }]
+      content: [{ type: "text", text: `Error in mail ${operation}: ${error.message}` }]
     };
   }
 }
 
-async function listCategories(accessToken) {
-  const response = await callGraphAPI(
-    accessToken,
-    'GET',
-    'me/outlook/masterCategories'
-  );
-  
-  if (!response.value || response.value.length === 0) {
-    return {
-      content: [{ type: "text", text: "No categories found." }]
-    };
-  }
-  
-  const categoriesList = response.value.map((cat, index) => {
-    return `${index + 1}. ${cat.displayName} (Color: ${cat.color})`;
-  }).join('\n');
-  
-  return {
-    content: [{ 
-      type: "text", 
-      text: `Categories:\n${categoriesList}` 
-    }]
-  };
-}
-
-async function createCategory(accessToken, params) {
-  const { displayName, color = 'preset0' } = params;
-  
-  if (!displayName) {
-    return {
-      content: [{ 
-        type: "text", 
-        text: "Missing required parameter: displayName" 
-      }]
-    };
-  }
-  
-  const response = await callGraphAPI(
-    accessToken,
-    'POST',
-    'me/outlook/masterCategories',
-    { displayName, color }
-  );
-  
-  return {
-    content: [{ 
-      type: "text", 
-      text: `Category '${displayName}' created with color ${color}` 
-    }]
-  };
-}
-
-async function applyCategory(accessToken, params) {
-  const { emailId, categories } = params;
-  
-  if (!emailId || !categories) {
-    return {
-      content: [{ 
-        type: "text", 
-        text: "Missing required parameters: emailId and categories" 
-      }]
-    };
-  }
-  
-  await callGraphAPI(
-    accessToken,
-    'PATCH',
-    `me/messages/${emailId}`,
-    { categories: Array.isArray(categories) ? categories : [categories] }
-  );
-  
-  return {
-    content: [{ type: "text", text: "Categories applied successfully!" }]
-  };
-}
-
-/**
- * Get mail tips for recipients
- */
-async function getMailTips(accessToken, params) {
-  const { recipients } = params;
-  
-  if (!recipients || recipients.length === 0) {
-    return {
-      content: [{ 
-        type: "text", 
-        text: "Missing required parameter: recipients" 
-      }]
-    };
-  }
-  
-  const body = {
-    EmailAddresses: recipients.map(email => ({ address: email })),
-    MailTipsOptions: 'automaticReplies, mailboxFullStatus, customMailTip, deliveryRestriction, moderationStatus'
-  };
-  
-  const response = await callGraphAPI(
-    accessToken,
-    'POST',
-    'me/getMailTips',
-    body
-  );
-  
-  const tips = response.value.map((tip, index) => {
-    let tipInfo = `${recipients[index]}:\n`;
-    
-    if (tip.automaticReplies?.message) {
-      tipInfo += `  - Auto-reply: ${tip.automaticReplies.message}\n`;
-    }
-    if (tip.mailboxFull) {
-      tipInfo += `  - Mailbox is full\n`;
-    }
-    if (tip.customMailTip) {
-      tipInfo += `  - Custom tip: ${tip.customMailTip}\n`;
-    }
-    if (tip.deliveryRestricted) {
-      tipInfo += `  - Delivery restricted\n`;
-    }
-    if (tip.isModerated) {
-      tipInfo += `  - Messages are moderated\n`;
-    }
-    
-    return tipInfo;
-  }).join('\n');
-  
-  return {
-    content: [{ 
-      type: "text", 
-      text: `Mail Tips:\n${tips}` 
-    }]
-  };
-}
-
-/**
- * Handle email with mentions
- */
-async function handleMentions(args) {
-  const { operation, ...params } = args;
-  
-  if (!operation) {
-    return {
-      content: [{ 
-        type: "text", 
-        text: "Missing required parameter: operation. Valid operations are: list, get" 
-      }]
-    };
-  }
-  
-  try {
-    const accessToken = await ensureAuthenticated();
-    
-    switch (operation) {
-      case 'list':
-        return await listMentions(accessToken, params);
-      case 'get':
-        return await getMentions(accessToken, params);
-      default:
-        return {
-          content: [{ 
-            type: "text", 
-            text: `Invalid operation: ${operation}` 
-          }]
-        };
-    }
-  } catch (error) {
-    console.error(`Error in mentions ${operation}:`, error);
-    return {
-      content: [{ type: "text", text: `Error: ${error.message}` }]
-    };
-  }
-}
-
-async function listMentions(accessToken, params) {
-  const { maxResults = 25 } = params;
-  
-  const queryParams = {
-    $filter: 'mentionsPreview/isMentioned eq true',
-    $select: 'id,subject,from,receivedDateTime,bodyPreview,mentionsPreview',
-    $orderby: 'receivedDateTime DESC',
-    $top: maxResults
-  };
-  
-  const response = await callGraphAPI(
-    accessToken,
-    'GET',
-    'me/messages',
-    null,
-    queryParams
-  );
-  
-  if (!response.value || response.value.length === 0) {
-    return {
-      content: [{ type: "text", text: "No messages with mentions found." }]
-    };
-  }
-  
-  const messagesList = response.value.map((msg, index) => {
-    return `${index + 1}. ${msg.subject}
-   From: ${msg.from?.emailAddress?.address || 'N/A'}
-   Date: ${new Date(msg.receivedDateTime).toLocaleString()}
-   ID: ${msg.id}`;
-  }).join('\n\n');
-  
-  return {
-    content: [{ 
-      type: "text", 
-      text: `Found ${response.value.length} messages with mentions:\n\n${messagesList}` 
-    }]
-  };
-}
-
-// Export consolidated tools
+// Export consolidated single tool
 const emailTools = [
   {
-    name: "email",
-    description: "Manage emails: list, read, send messages, or manage drafts",
+    name: "mail",
+    description: "Unified email management: list, read, send, reply, draft, search, move, folders, rules, categories, and focused inbox",
     inputSchema: {
       type: "object",
       properties: {
-        operation: { 
-          type: "string", 
-          enum: ["list", "read", "send", "draft", "update_draft", "send_draft", "list_drafts"],
-          description: "The operation to perform" 
-        },
-        // List parameters
-        folderId: { type: "string", description: "Folder ID to list emails from (for list operation)" },
-        maxResults: { type: "number", description: "Maximum number of results (default: 10)" },
-        // Read parameters
-        emailId: { type: "string", description: "Email ID to read (for read operation)" },
-        // Send/Draft parameters
-        to: { 
-          type: "array", 
-          items: { type: "string" },
-          description: "Recipient email addresses (for send/draft operations)" 
-        },
-        subject: { type: "string", description: "Email subject (for send/draft operations)" },
-        body: { type: "string", description: "Email body in HTML format (for send/draft operations)" },
-        cc: { 
-          type: "array", 
-          items: { type: "string" },
-          description: "CC recipients (optional)" 
-        },
-        bcc: { 
-          type: "array", 
-          items: { type: "string" },
-          description: "BCC recipients (optional)" 
-        },
-        // Draft-specific parameters
-        draftId: { type: "string", description: "Draft ID (for update_draft and send_draft operations)" }
-      },
-      required: ["operation"]
-    },
-    handler: handleEmail
-  },
-  {
-    name: "email_search",
-    description: "Unified email search with KQL support, folder filtering, and automatic optimization",
-    inputSchema: {
-      type: "object",
-      properties: {
-        query: { 
-          type: "string", 
-          description: "Search text or KQL syntax (e.g., 'project' or 'from:john@example.com AND subject:report')" 
-        },
-        from: { 
-          type: "string", 
-          description: "Filter by sender email address" 
-        },
-        to: { 
-          type: "string", 
-          description: "Filter by recipient email address" 
-        },
-        subject: { 
-          type: "string", 
-          description: "Filter by subject line" 
-        },
-        hasAttachments: { 
-          type: "boolean", 
-          description: "Filter emails with/without attachments" 
-        },
-        isRead: { 
-          type: "boolean", 
-          description: "Filter by read/unread status" 
-        },
-        importance: { 
-          type: "string", 
-          enum: ["high", "normal", "low"],
-          description: "Filter by importance level" 
-        },
-        startDate: { 
-          type: "string", 
-          description: "Start date - ISO format (2025-08-01) or relative (7d/1w/1m/1y)" 
-        },
-        endDate: { 
-          type: "string", 
-          description: "End date - ISO format or relative" 
-        },
-        folderId: { 
+        operation: {
           type: "string",
-          description: "Specific folder ID to search in"
+          enum: [
+            "list", "read", "send", "reply", "draft", "update_draft", "send_draft", "list_drafts",
+            "search", "move",
+            "list_folders", "create_folder",
+            "list_rules", "create_rule",
+            "focused",
+            "list_categories", "create_category", "apply_category", "remove_category"
+          ],
+          description: "The operation to perform"
         },
-        folderName: { 
-          type: "string",
-          description: "Folder name (inbox/sent/drafts/deleted/junk/archive or custom name)"
-        },
-        maxResults: { 
-          type: "number", 
-          description: "Max results 1-1000 (default: 25)" 
-        },
-        useRelevance: { 
-          type: "boolean", 
-          description: "Sort by relevance instead of date (uses Microsoft Search API)" 
-        },
-        includeDeleted: { 
-          type: "boolean", 
-          description: "Include deleted items in search results" 
-        }
-      },
-      required: []
-    },
-    handler: handleEmailSearch
-  },
-  {
-    name: "email_move",
-    description: "Move emails to a folder with optional batch processing",
-    inputSchema: {
-      type: "object",
-      properties: {
-        emailIds: { 
-          type: "array", 
-          items: { type: "string" },
-          description: "Email IDs to move" 
-        },
-        destinationFolderId: { type: "string", description: "Destination folder ID" },
-        batch: { type: "boolean", description: "Use batch processing for better performance (auto-enabled for >5 emails)" }
-      },
-      required: ["emailIds", "destinationFolderId"]
-    },
-    handler: handleEmailMove
-  },
-  {
-    name: "email_folder",
-    description: "Manage email folders: list or create",
-    inputSchema: {
-      type: "object",
-      properties: {
-        operation: { 
-          type: "string", 
-          enum: ["list", "create"],
-          description: "The operation to perform" 
-        },
-        // Create parameters
-        displayName: { type: "string", description: "Folder display name (for create operation)" },
-        parentFolderId: { type: "string", description: "Parent folder ID (optional, for creating subfolders)" }
-      },
-      required: ["operation"]
-    },
-    handler: handleEmailFolder
-  },
-  {
-    name: "email_rules",
-    description: "Manage email rules: list or create",
-    inputSchema: {
-      type: "object",
-      properties: {
-        operation: { 
-          type: "string", 
-          enum: ["list", "create"],
-          description: "The operation to perform" 
-        },
-        enhanced: { type: "boolean", description: "Use enhanced mode for more features (default: false)" },
-        // Create parameters
-        displayName: { type: "string", description: "Rule display name (for create operation)" },
-        fromAddresses: { 
-          type: "array", 
-          items: { type: "string" },
-          description: "Filter emails from these addresses" 
-        },
-        moveToFolder: { type: "string", description: "Folder ID to move emails to" },
-        forwardTo: { 
-          type: "array", 
-          items: { type: "string" },
-          description: "Email addresses to forward to" 
-        },
-        // Enhanced create parameters
-        subjectContains: { 
-          type: "array", 
-          items: { type: "string" },
-          description: "Filter by subject keywords (enhanced mode)" 
-        },
-        importance: { 
-          type: "string", 
-          enum: ["low", "normal", "high"],
-          description: "Filter by importance (enhanced mode)" 
-        }
-      },
-      required: ["operation"]
-    },
-    handler: handleEmailRules
-  }
-,
-  {
-    name: "email_focused",
-    description: "Get focused inbox messages (important messages filtered by AI)",
-    inputSchema: {
-      type: "object",
-      properties: {
-        maxResults: { type: "number", description: "Maximum number of results (default: 25)" }
-      }
-    },
-    handler: async (args) => {
-      const accessToken = await ensureAuthenticated();
-      return await getFocusedInbox(accessToken, args);
-    }
-  },
-  {
-    name: "email_categories",
-    description: "Manage email categories: list, create, update, delete, apply, or remove",
-    inputSchema: {
-      type: "object",
-      properties: {
-        operation: { 
-          type: "string", 
-          enum: ["list", "create", "update", "delete", "apply", "remove"],
-          description: "The operation to perform" 
-        },
-        // Create/Update parameters
-        displayName: { type: "string", description: "Category display name" },
-        color: { 
-          type: "string",
-          description: "Category color (preset0-preset24)" 
-        },
-        // Apply/Remove parameters
-        emailId: { type: "string", description: "Email ID to apply/remove category" },
-        categories: { 
+        // Core email parameters
+        emailId: { type: "string", description: "Email ID (for read, reply, move, apply_category)" },
+        to: {
           type: "array",
           items: { type: "string" },
-          description: "Categories to apply/remove" 
+          description: "Recipient email addresses (for send/draft/reply)"
         },
-        // Update/Delete parameters
-        categoryId: { type: "string", description: "Category ID for update/delete" }
+        subject: { type: "string", description: "Email subject (for send/draft)" },
+        body: { type: "string", description: "Email body in HTML format (for send/draft/reply)" },
+        cc: {
+          type: "array",
+          items: { type: "string" },
+          description: "CC recipients"
+        },
+        bcc: {
+          type: "array",
+          items: { type: "string" },
+          description: "BCC recipients"
+        },
+        draftId: { type: "string", description: "Draft ID (for update_draft, send_draft)" },
+        // Search parameters
+        query: { type: "string", description: "Search text or KQL syntax (for search)" },
+        from: { type: "string", description: "Filter by sender email (for search)" },
+        hasAttachments: { type: "boolean", description: "Filter by attachments (for search)" },
+        isRead: { type: "boolean", description: "Filter by read/unread (for search)" },
+        importance: { type: "string", enum: ["high", "normal", "low"], description: "Filter by importance" },
+        startDate: { type: "string", description: "Start date - ISO or relative 7d/1w/1m/1y (for search)" },
+        endDate: { type: "string", description: "End date - ISO or relative (for search)" },
+        folderName: { type: "string", description: "Folder name: inbox/sent/drafts/deleted/junk/archive (for search)" },
+        useRelevance: { type: "boolean", description: "Sort by relevance (for search)" },
+        includeDeleted: { type: "boolean", description: "Include deleted items (for search)" },
+        // Move parameters
+        emailIds: { type: "array", items: { type: "string" }, description: "Email IDs to move (for move)" },
+        destinationFolderId: { type: "string", description: "Destination folder ID (for move)" },
+        batch: { type: "boolean", description: "Use batch processing (for move)" },
+        // Folder parameters
+        folderId: { type: "string", description: "Folder ID (for list, search)" },
+        displayName: { type: "string", description: "Name (for create_folder, create_rule, create_category)" },
+        parentFolderId: { type: "string", description: "Parent folder ID (for create_folder)" },
+        // Rule parameters
+        enhanced: { type: "boolean", description: "Enhanced mode for rules" },
+        fromAddresses: { type: "array", items: { type: "string" }, description: "From filter (for create_rule)" },
+        moveToFolder: { type: "string", description: "Move-to folder ID (for create_rule)" },
+        forwardTo: { type: "array", items: { type: "string" }, description: "Forward-to emails (for create_rule)" },
+        subjectContains: { type: "array", items: { type: "string" }, description: "Subject keywords (for create_rule)" },
+        // Category parameters
+        categories: { type: "array", items: { type: "string" }, description: "Categories (for apply/remove)" },
+        color: { type: "string", description: "Category color preset0-preset24 (for create_category)" },
+        categoryId: { type: "string", description: "Category ID (for update/delete)" },
+        // Common
+        maxResults: { type: "number", description: "Maximum number of results" },
+        mailbox: { type: "string", description: "Mailbox to access (default: authenticated user). Use for shared mailboxes." }
       },
       required: ["operation"]
     },
-    handler: handleEmailCategories
+    handler: safeTool('mail', handleMail)
   }
-  // Removed email_mailtips and email_mentions - not functional with current permissions/setup
 ];
 
 module.exports = { emailTools };
