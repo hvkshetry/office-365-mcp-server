@@ -332,33 +332,37 @@ async function replyToEmail(accessToken, params) {
       };
     }
 
+    // Use comment (not message.body) so Graph preserves the quoted original message.
+    // message.body replaces the entire reply body, wiping the original.
     const replyPayload = {
-      message: {
-        body: {
-          contentType: "HTML",
-          content: params.body
-        }
-      }
+      comment: params.body
     };
 
+    // Only add message object if we need to override from/to/cc
+    const messageOverrides = {};
+
     if (params.mailbox && params.mailbox !== 'me') {
-      replyPayload.message.from = {
+      messageOverrides.from = {
         emailAddress: { address: params.mailbox }
       };
     }
 
     if (params.to) {
       const toRecipients = Array.isArray(params.to) ? params.to : [params.to];
-      replyPayload.message.toRecipients = toRecipients.map(email => ({
+      messageOverrides.toRecipients = toRecipients.map(email => ({
         emailAddress: { address: email }
       }));
     }
 
     if (params.cc) {
       const ccRecipients = Array.isArray(params.cc) ? params.cc : [params.cc];
-      replyPayload.message.ccRecipients = ccRecipients.map(email => ({
+      messageOverrides.ccRecipients = ccRecipients.map(email => ({
         emailAddress: { address: email }
       }));
+    }
+
+    if (Object.keys(messageOverrides).length > 0) {
+      replyPayload.message = messageOverrides;
     }
 
     const replyEndpoint = `${config.getMailboxPrefix(params.mailbox)}/messages/${params.emailId}/reply`;
