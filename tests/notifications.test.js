@@ -1,48 +1,56 @@
-const { describe, it, expect, jest } = require('@jest/globals');
-const {
-  handleCreateSubscription,
-  handleListSubscriptions,
-  handleDeleteSubscription,
-  handleUpdateSubscription,
-  handleManageWebhook
-} = require('../notifications');
-const tokenManager = require('../auth/token-manager');
+const { describe, it, expect } = require('@jest/globals');
+const { notificationTools } = require('../notifications');
+const { ensureAuthenticated } = require('../auth');
 const { callGraphAPI } = require('../utils/graph-api');
 
-jest.mock('../auth/token-manager');
+jest.mock('../auth', () => ({
+  ensureAuthenticated: jest.fn()
+}));
 jest.mock('../utils/graph-api');
 
-describe('Notifications Module', () => {
-  const mockTokens = {
-    access_token: 'mock-access-token',
-    email: 'user@example.com'
-  };
+// The consolidated notifications tool
+const notificationsHandler = notificationTools[0].handler;
+
+describe('Notifications Module (Consolidated)', () => {
+  const mockAccessToken = 'mock-access-token';
 
   beforeEach(() => {
     jest.clearAllMocks();
-    tokenManager.loadTokenCache.mockReturnValue(mockTokens);
+    ensureAuthenticated.mockResolvedValue(mockAccessToken);
   });
 
-  describe('handleCreateSubscription', () => {
+  describe('routing', () => {
+    it('should require operation parameter', async () => {
+      const result = await notificationsHandler({});
+      expect(result.content[0].text).toContain('Missing required parameter: operation');
+    });
+
+    it('should reject invalid operation', async () => {
+      const result = await notificationsHandler({ operation: 'invalid' });
+      expect(result.content[0].text).toContain('Invalid operation');
+    });
+  });
+
+  describe('create operation', () => {
     it('should create a subscription successfully', async () => {
       const mockResponse = {
         id: 'sub123',
         resource: '/users/user123/events',
-        changeType: 'created,updated',
         expirationDateTime: '2024-01-15T00:00:00Z'
       };
-      
+
       callGraphAPI.mockResolvedValue(mockResponse);
-      
-      const result = await handleCreateSubscription({
+
+      const result = await notificationsHandler({
+        operation: 'create',
         resource: '/users/user123/events',
         changeType: 'created,updated',
         notificationUrl: 'https://webhook.example.com/events',
         expirationMinutes: 60
       });
-      
+
       expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
+        mockAccessToken,
         'POST',
         '/subscriptions',
         expect.objectContaining({
@@ -56,142 +64,93 @@ describe('Notifications Module', () => {
     });
 
     it('should validate required parameters', async () => {
-      const result = await handleCreateSubscription({
+      const result = await notificationsHandler({
+        operation: 'create',
         resource: '/users/user123/events'
       });
-      
-      expect(result.content[0].text).toContain('Missing required parameters');
-    });
 
-    it('should handle includeResourceData option', async () => {
-      const mockResponse = { id: 'sub123' };
-      
-      callGraphAPI.mockResolvedValue(mockResponse);
-      
-      await handleCreateSubscription({
-        resource: '/users/user123/events',
-        changeType: 'created',
-        notificationUrl: 'https://webhook.example.com/events',
-        includeResourceData: true
-      });
-      
-      expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'POST',
-        '/subscriptions',
-        expect.objectContaining({
-          includeResourceData: true
-        })
-      );
+      expect(result.content[0].text).toContain('Missing required parameters');
     });
   });
 
-  describe('handleListSubscriptions', () => {
+  describe('list operation', () => {
     it('should list all subscriptions', async () => {
       const mockSubscriptions = {
         value: [
-          { id: 'sub1', resource: '/users/user1/events', changeType: 'created' },
-          { id: 'sub2', resource: '/teams/team1/channels', changeType: 'updated' }
+          { id: 'sub1', resource: '/users/user1/events', changeType: 'created', expirationDateTime: '2024-01-15T00:00:00Z' },
+          { id: 'sub2', resource: '/teams/team1/channels', changeType: 'updated', expirationDateTime: '2024-01-16T00:00:00Z' }
         ]
       };
-      
+
       callGraphAPI.mockResolvedValue(mockSubscriptions);
-      
-      const result = await handleListSubscriptions({});
-      
+
+      const result = await notificationsHandler({ operation: 'list' });
+
       expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
+        mockAccessToken,
         'GET',
         '/subscriptions',
         null
       );
-      expect(result.content[0].text).toContain('Found 2 subscriptions');
+      expect(result.content[0].text).toContain('Found 2');
+    });
+
+    it('should handle no subscriptions', async () => {
+      callGraphAPI.mockResolvedValue({ value: [] });
+
+      const result = await notificationsHandler({ operation: 'list' });
+      expect(result.content[0].text).toContain('No active subscriptions');
     });
   });
 
-  describe('handleDeleteSubscription', () => {
-    it('should delete a subscription successfully', async () => {
-      callGraphAPI.mockResolvedValue(null);
-      
-      const result = await handleDeleteSubscription({
-        subscriptionId: 'sub123'
-      });
-      
-      expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'DELETE',
-        '/subscriptions/sub123',
-        null
-      );
-      expect(result.content[0].text).toBe('Successfully deleted subscription.');
-    });
+  describe('renew operation', () => {
+    it('should renew a subscription', async () => {
+      callGraphAPI.mockResolvedValue({});
 
-    it('should validate required parameters', async () => {
-      const result = await handleDeleteSubscription({});
-      
-      expect(result.content[0].text).toContain('Missing required parameter: subscriptionId');
-    });
-  });
-
-  describe('handleUpdateSubscription', () => {
-    it('should update subscription expiration', async () => {
-      const mockResponse = {
-        id: 'sub123',
-        expirationDateTime: '2024-01-16T00:00:00Z'
-      };
-      
-      callGraphAPI.mockResolvedValue(mockResponse);
-      
-      const result = await handleUpdateSubscription({
+      const result = await notificationsHandler({
+        operation: 'renew',
         subscriptionId: 'sub123',
         expirationMinutes: 120
       });
-      
+
       expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
+        mockAccessToken,
         'PATCH',
         '/subscriptions/sub123',
         expect.objectContaining({
           expirationDateTime: expect.any(String)
         })
       );
-      expect(result.content[0].text).toContain('Successfully updated subscription');
-    });
-  });
-
-  describe('handleManageWebhook', () => {
-    it('should validate a webhook', async () => {
-      const result = await handleManageWebhook({
-        action: 'validate',
-        validationToken: 'test-token-123'
-      });
-      
-      expect(result.content[0].text).toBe('test-token-123');
-    });
-
-    it('should process a webhook notification', async () => {
-      const notification = {
-        resource: '/users/user123/events/event123',
-        changeType: 'created',
-        clientState: 'secretClientState',
-        resourceData: {
-          id: 'event123',
-          subject: 'Team Meeting'
-        }
-      };
-      
-      const result = await handleManageWebhook({
-        action: 'process',
-        notifications: [notification]
-      });
-      
-      expect(result.content[0].text).toContain('Processed 1 notifications');
+      expect(result.content[0].text).toContain('renewed successfully');
     });
 
     it('should validate required parameters', async () => {
-      const result = await handleManageWebhook({});
-      
-      expect(result.content[0].text).toContain('Missing required parameter: action');
+      const result = await notificationsHandler({ operation: 'renew' });
+      expect(result.content[0].text).toContain('Missing required parameter: subscriptionId');
+    });
+  });
+
+  describe('delete operation', () => {
+    it('should delete a subscription', async () => {
+      callGraphAPI.mockResolvedValue(null);
+
+      const result = await notificationsHandler({
+        operation: 'delete',
+        subscriptionId: 'sub123'
+      });
+
+      expect(callGraphAPI).toHaveBeenCalledWith(
+        mockAccessToken,
+        'DELETE',
+        '/subscriptions/sub123',
+        null
+      );
+      expect(result.content[0].text).toContain('deleted successfully');
+    });
+
+    it('should validate required parameters', async () => {
+      const result = await notificationsHandler({ operation: 'delete' });
+      expect(result.content[0].text).toContain('Missing required parameter: subscriptionId');
     });
   });
 });

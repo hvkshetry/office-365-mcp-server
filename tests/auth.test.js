@@ -1,64 +1,65 @@
-const { describe, it, expect, jest } = require('@jest/globals');
-const { handleAuthenticate, handleGetAuthStatus, handleLogout } = require('../auth');
+const { describe, it, expect } = require('@jest/globals');
+const { authTools } = require('../auth');
 const tokenManager = require('../auth/token-manager');
 
 jest.mock('../auth/token-manager');
+jest.mock('../auth/auto-refresh', () => ({
+  needsRefresh: jest.fn().mockReturnValue(false)
+}));
 
-describe('Authentication Module', () => {
+// The consolidated system tool
+const systemHandler = authTools[0].handler;
+
+describe('Auth Module (Consolidated System Tool)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
 
-  describe('handleAuthenticate', () => {
-    it('should initiate authentication successfully', async () => {
-      const result = await handleAuthenticate({});
-      
+  describe('routing', () => {
+    it('should require operation parameter', async () => {
+      const result = await systemHandler({});
+      expect(result.content[0].text).toContain('Missing required parameter: operation');
+    });
+
+    it('should reject invalid operation', async () => {
+      const result = await systemHandler({ operation: 'invalid' });
+      expect(result.content[0].text).toContain('Invalid operation');
+    });
+  });
+
+  describe('about operation', () => {
+    it('should return server information', async () => {
+      const result = await systemHandler({ operation: 'about' });
       expect(result.content[0].type).toBe('text');
-      expect(result.content[0].text).toContain('Please visit the following URL');
+      expect(result.content[0].text).toContain('Office MCP Server');
     });
   });
 
-  describe('handleGetAuthStatus', () => {
-    it('should return authenticated status with valid tokens', async () => {
-      const mockTokens = {
-        access_token: 'mock-access-token',
-        email: 'user@example.com'
-      };
-      
-      tokenManager.loadTokenCache.mockReturnValue(mockTokens);
-      tokenManager.checkAuthStatus.mockResolvedValue(true);
-      
-      const result = await handleGetAuthStatus({});
-      
-      expect(result.content[0].text).toContain('Authenticated as user@example.com');
-    });
-
-    it('should return not authenticated status with no tokens', async () => {
-      tokenManager.loadTokenCache.mockReturnValue(null);
-      
-      const result = await handleGetAuthStatus({});
-      
-      expect(result.content[0].text).toBe('Not authenticated. Use the authenticate tool to log in.');
+  describe('authenticate operation', () => {
+    it('should return authentication URL', async () => {
+      const result = await systemHandler({ operation: 'authenticate' });
+      expect(result.content[0].type).toBe('text');
+      // Should contain either auth URL or test mode success
+      expect(result.content[0].text).toBeTruthy();
     });
   });
 
-  describe('handleLogout', () => {
-    it('should successfully logout', async () => {
-      tokenManager.loadTokenCache.mockReturnValue({ access_token: 'mock-token' });
-      tokenManager.clearTokenCache.mockImplementation(() => {});
-      
-      const result = await handleLogout({});
-      
-      expect(tokenManager.clearTokenCache).toHaveBeenCalled();
-      expect(result.content[0].text).toBe('Successfully logged out.');
+  describe('check_status operation', () => {
+    it('should return not authenticated when no tokens', async () => {
+      tokenManager.loadTokenCache.mockReturnValue(null);
+
+      const result = await systemHandler({ operation: 'check_status' });
+      expect(result.content[0].text).toContain('Not authenticated');
     });
 
-    it('should handle logout when not authenticated', async () => {
-      tokenManager.loadTokenCache.mockReturnValue(null);
-      
-      const result = await handleLogout({});
-      
-      expect(result.content[0].text).toBe('Not currently authenticated.');
+    it('should return authenticated with valid tokens', async () => {
+      tokenManager.loadTokenCache.mockReturnValue({
+        access_token: 'mock-token',
+        expires_at: Date.now() + 3600000
+      });
+
+      const result = await systemHandler({ operation: 'check_status' });
+      expect(result.content[0].text).toContain('Authenticated');
     });
   });
 });

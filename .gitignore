@@ -49,6 +49,13 @@ test-assignment-fix.js
 test-consolidation.js
 test_tools.js
 
+# One-off migration/utility scripts
+add_mailbox_support.py
+add_mailbox_to_schemas.py
+
+# Local MCP config (contains machine-specific paths)
+.mcp.json
+
 # Backup files
 *.bak
 *.backup

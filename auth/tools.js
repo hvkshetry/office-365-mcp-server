@@ -3,6 +3,7 @@
  */
 const config = require('../config');
 const tokenManager = require('./token-manager');
+const { safeTool } = require('../utils/errors');
 
 /**
  * About tool handler
@@ -92,42 +93,59 @@ async function handleCheckAuthStatus() {
   };
 }
 
-// Tool definitions
+/**
+ * Unified system handler - single entry point for auth/system operations
+ */
+async function handleSystem(args) {
+  const { operation, ...params } = args || {};
+
+  if (!operation) {
+    return {
+      content: [{
+        type: "text",
+        text: "Missing required parameter: operation. Valid operations: about, authenticate, check_status"
+      }]
+    };
+  }
+
+  switch (operation) {
+    case 'about':
+      return await handleAbout();
+    case 'authenticate':
+      return await handleAuthenticate(params);
+    case 'check_status':
+      return await handleCheckAuthStatus();
+    default:
+      return {
+        content: [{
+          type: "text",
+          text: `Invalid operation: ${operation}. Valid operations: about, authenticate, check_status`
+        }]
+      };
+  }
+}
+
+// Tool definitions - consolidated from 3 tools to 1
 const authTools = [
   {
-    name: "about",
-    description: "Returns information about this Office Assistant server",
-    inputSchema: {
-      type: "object",
-      properties: {},
-      required: []
-    },
-    handler: handleAbout
-  },
-  {
-    name: "authenticate",
-    description: "Authenticate with Microsoft Graph API to access Microsoft 365 services",
+    name: "system",
+    description: "System operations: get server info, authenticate with Microsoft Graph API, or check authentication status",
     inputSchema: {
       type: "object",
       properties: {
+        operation: {
+          type: "string",
+          enum: ["about", "authenticate", "check_status"],
+          description: "Operation to perform: about (server info), authenticate (connect to MS Graph), check_status (verify auth)"
+        },
         force: {
           type: "boolean",
-          description: "Force re-authentication even if already authenticated"
+          description: "Force re-authentication even if already authenticated (for authenticate operation)"
         }
       },
-      required: []
+      required: ["operation"]
     },
-    handler: handleAuthenticate
-  },
-  {
-    name: "check-auth-status",
-    description: "Check the current authentication status with Microsoft Graph API",
-    inputSchema: {
-      type: "object",
-      properties: {},
-      required: []
-    },
-    handler: handleCheckAuthStatus
+    handler: safeTool('system', handleSystem)
   }
 ];
 

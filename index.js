@@ -13,6 +13,7 @@ require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const { Server } = require("@modelcontextprotocol/sdk/server/index.js");
 const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio.js");
+const { ListToolsRequestSchema, CallToolRequestSchema, McpError, ErrorCode } = require("@modelcontextprotocol/sdk/types.js");
 const config = require('./config');
 
 // Import module tools
@@ -25,8 +26,9 @@ const { plannerTools } = require('./planner');
 const { filesTools } = require('./files');
 const { searchTools } = require('./search');
 const { contactsTools } = require('./contacts');
-// Future modules to be developed:
-// const { adminTools } = require('./admin');
+const { todoTools } = require('./todo');
+const { groupsTools } = require('./groups');
+const { directoryTools } = require('./directory');
 
 // Log startup information
 console.error(`STARTING ${config.SERVER_NAME.toUpperCase()} MCP SERVER`);
@@ -45,113 +47,42 @@ const TOOLS = [
   ...plannerTools,
   ...filesTools,
   ...searchTools,
-  ...contactsTools
-  // Future modules will be added here:
-  // ...adminTools
+  ...contactsTools,
+  ...todoTools,
+  ...groupsTools,
+  ...directoryTools
 ];
 
 // Create server with tools capabilities
+// SDK handles initialize and ping automatically via setRequestHandler
 const server = new Server(
   { name: config.SERVER_NAME, version: config.SERVER_VERSION },
-  { 
-    capabilities: { 
-      tools: TOOLS.reduce((acc, tool) => {
-        acc[tool.name] = {};
-        return acc;
-      }, {})
-    } 
-  }
+  { capabilities: { tools: {} } }
 );
 
-// Handle all requests
-server.fallbackRequestHandler = async (request) => {
-  try {
-    const { method, params, id } = request;
-    console.error(`REQUEST: ${method} [${id}]`);
-    
-    // Initialize handler
-    if (method === "initialize") {
-      console.error(`INITIALIZE REQUEST: ID [${id}]`);
-      return {
-        protocolVersion: "2024-11-05",
-        capabilities: { 
-          tools: TOOLS.reduce((acc, tool) => {
-            acc[tool.name] = {};
-            return acc;
-          }, {})
-        },
-        serverInfo: { name: config.SERVER_NAME, version: config.SERVER_VERSION }
-      };
-    }
-    
-    // Tools list handler
-    if (method === "tools/list") {
-      console.error(`TOOLS LIST REQUEST: ID [${id}]`);
-      console.error(`TOOLS COUNT: ${TOOLS.length}`);
-      console.error(`TOOLS NAMES: ${TOOLS.map(t => t.name).join(', ')}`);
-      
-      return {
-        tools: TOOLS.map(tool => ({
-          name: tool.name,
-          description: tool.description,
-          inputSchema: tool.inputSchema
-        }))
-      };
-    }
-    
-    // Required empty responses for other capabilities
-    if (method === "resources/list") return { resources: [] };
-    if (method === "prompts/list") return { prompts: [] };
-    
-    // Tool call handler
-    if (method === "tools/call") {
-      try {
-        const { name, arguments: args = {} } = params || {};
-        
-        console.error(`TOOL CALL: ${name}`);
-        
-        // Find the tool handler
-        const tool = TOOLS.find(t => t.name === name);
-        
-        if (tool && tool.handler) {
-          return await tool.handler(args);
-        }
-        
-        // Tool not found
-        return {
-          error: {
-            code: -32601,
-            message: `Tool not found: ${name}`
-          }
-        };
-      } catch (error) {
-        console.error(`Error in tools/call:`, error);
-        return {
-          error: {
-            code: -32603,
-            message: `Error processing tool call: ${error.message}`
-          }
-        };
-      }
-    }
-    
-    // For any other method, return method not found
-    return {
-      error: {
-        code: -32601,
-        message: `Method not found: ${method}`
-      }
-    };
-  } catch (error) {
-    console.error(`Error in fallbackRequestHandler:`, error);
-    return {
-      error: {
-        code: -32603,
-        message: `Error processing request: ${error.message}`
-      }
-    };
+// tools/list — return tool metadata
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  console.error(`TOOLS LIST REQUEST — ${TOOLS.length} tools`);
+  return {
+    tools: TOOLS.map(tool => ({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema
+    }))
+  };
+});
+
+// tools/call — dispatch to the matching tool handler
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name, arguments: args = {} } = request.params;
+  console.error(`TOOL CALL: ${name}`);
+
+  const tool = TOOLS.find(t => t.name === name);
+  if (!tool) {
+    throw new McpError(ErrorCode.MethodNotFound, `Tool not found: ${name}`);
   }
-};
+  return await tool.handler(args);
+});
 
 // Graceful shutdown handlers
 let isShuttingDown = false;
@@ -173,10 +104,36 @@ process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // Start the server
-const transport = new StdioServerTransport();
-server.connect(transport)
-  .then(() => console.error(`${config.SERVER_NAME} connected and listening`))
-  .catch(error => {
-    console.error(`Connection error: ${error.message}`);
-    process.exit(1);
+if (config.TRANSPORT_TYPE === 'http') {
+  const { SSEServerTransport } = require("@modelcontextprotocol/sdk/server/sse.js");
+  const express = require('express');
+  const app = express();
+  app.use(express.json());
+
+  let sseTransport;
+
+  app.get("/sse", async (req, res) => {
+    sseTransport = new SSEServerTransport("/message", res);
+    await server.connect(sseTransport);
   });
+
+  app.post("/message", async (req, res) => {
+    if (sseTransport) {
+      await sseTransport.handlePostMessage(req, res);
+    } else {
+      res.status(503).json({ error: "No SSE connection" });
+    }
+  });
+
+  app.listen(config.HTTP_PORT, config.HTTP_HOST, () => {
+    console.error(`${config.SERVER_NAME} HTTP/SSE on ${config.HTTP_HOST}:${config.HTTP_PORT}`);
+  });
+} else {
+  const transport = new StdioServerTransport();
+  server.connect(transport)
+    .then(() => console.error(`${config.SERVER_NAME} connected and listening`))
+    .catch(error => {
+      console.error(`Connection error: ${error.message}`);
+      process.exit(1);
+    });
+}

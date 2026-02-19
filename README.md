@@ -2,22 +2,25 @@
 
 This is a comprehensive implementation of the Office MCP (Model Context Protocol) server that connects Claude with Microsoft 365 services through the Microsoft Graph API.
 
-> **🚀 Headless Operation!** Run without browser authentication after initial setup. Automatic token refresh and Windows Task Scheduler support for invisible background operation. See [TASK_SCHEDULER_SETUP.md](TASK_SCHEDULER_SETUP.md) for Windows setup guide.
+> **Headless Operation!** Run without browser authentication after initial setup. Automatic token refresh and Windows Task Scheduler support for invisible background operation. See [TASK_SCHEDULER_SETUP.md](TASK_SCHEDULER_SETUP.md) for Windows setup guide.
 
 
-> **⚠️ DEVELOPMENT STATUS: This project is under active development and is not yet production-ready. APIs, interfaces, and functionality may change without notice. Use at your own risk for evaluation and testing purposes only. Not recommended for production deployments.**
+> **DEVELOPMENT STATUS: This project is under active development and is not yet production-ready. APIs, interfaces, and functionality may change without notice. Use at your own risk for evaluation and testing purposes only. Not recommended for production deployments.**
 
 ## Features
 
-- **Complete Microsoft 365 Integration**: Email, Calendar, Teams, OneDrive/SharePoint, Contacts, and Planner
+- **Complete Microsoft 365 Integration**: Email, Calendar, Teams, OneDrive/SharePoint, Contacts, Planner, To Do, Groups, and Directory
+- **Consolidated Tool Architecture**: Operation-based routing reduces tool count for efficient LLM context usage
 - **Headless Operation**: Run without browser after initial authentication
 - **Automatic Token Management**: Persistent token storage with automatic refresh
+- **Shared Mailbox Support**: Access shared mailboxes with `.Shared` scopes
+- **Centralized Error Handling**: Consistent error formatting with actionable hints for Graph API errors
 - **Email Attachment Handling**: Download embedded attachments and map SharePoint URLs to local paths
 - **Advanced Email Search**: Unified search with KQL support and automatic query optimization
 - **Teams Meeting Management**: Access transcripts, recordings, and AI insights
 - **File Management**: Full OneDrive and SharePoint file operations
 - **Contact Management**: Full CRUD operations for Outlook contacts with advanced search
-- **Task Management**: Complete Microsoft Planner integration
+- **Task Management**: Microsoft Planner and To Do integration
 - **Configurable Paths**: Environment variables for all local sync paths
 
 ## Quick Start
@@ -58,45 +61,33 @@ npm run auth-server
 
 6. Configure Claude Desktop (see Claude Desktop Configuration below)
 
-## Core Capabilities
+## Tool Architecture
 
-### Email Operations
-- **Unified Search**: Single `email_search` tool with automatic optimization
-- **Attachment Handling**: Download embedded attachments, map SharePoint URLs to local paths
-- **Advanced Features**: Categories, rules, focused inbox, folder management
-- **Batch Operations**: Move multiple emails efficiently
+The server uses a consolidated tool design where each Microsoft 365 domain is exposed as a single tool with `operation` (and optionally `entity`) routing. This minimizes LLM context overhead while providing full functionality.
 
-### Calendar Management
-- **Full CRUD Operations**: Create, read, update, delete events
-- **Teams Integration**: Create meetings with Teams links
-- **Recurrence Support**: Complex recurring event patterns
-- **UTC Time Handling**: Proper timezone management
+| Tool | Domain | Operations |
+|------|--------|------------|
+| `system` | Auth & server info | `about`, `authenticate`, `check_status` |
+| `mail` | Email | `list`, `read`, `send`, `reply`, `draft`, `search`, `move`, `folder`, `rules`, `categories`, `focused` |
+| `calendar` | Calendar events | `list`, `get`, `create`, `update`, `delete`, `find_free_slots` |
+| `teams_meeting` | Teams meetings | `create`, `update`, `cancel`, `find`, `list_transcripts`, `get_transcript`, `get_recordings` |
+| `teams_channel` | Teams channels | `list`, `create`, `get`, `update`, `delete`, `send_message`, `list_messages`, `list_members` |
+| `teams_chat` | Teams chat | `list`, `create`, `get`, `send_message`, `list_messages`, `list_members` |
+| `files` | OneDrive/SharePoint | `list`, `get`, `search`, `upload`, `download`, `create_folder`, `delete`, `move`, `copy` |
+| `search` | Unified search | Keyword-based search across mail, files, events |
+| `contacts` | Outlook contacts | `list`, `get`, `create`, `update`, `delete`, `search`, `list_folders` |
+| `planner` | Microsoft Planner | Entity+operation: `plan.list`, `task.create`, `bucket.get_tasks`, `user.lookup`, etc. |
+| `todo` | Microsoft To Do | `list_lists`, `create_list`, `list_tasks`, `create_task`, `update_task`, `list_checklist`, etc. |
+| `groups` | M365 Groups | `list`, `get`, `create`, `update`, `delete`, `list_members`, `add_member`, `remove_member` |
+| `directory` | User directory | `lookup_user`, `get_profile`, `get_manager`, `get_reports`, `get_presence`, `search_users` |
+| `notifications` | Webhooks | `create`, `list`, `renew`, `delete` |
 
-### Teams Features
-- **Meeting Management**: Create, update, cancel meetings
-- **Transcript Access**: Retrieve meeting transcripts
-- **Recording Access**: Access meeting recordings
-- **Channel Operations**: Messages, members, tabs
-- **Chat Management**: Create, send, manage chat messages
+### Error Handling
 
-### File Management
-- **SharePoint Integration**: Local sync path mapping
-- **OneDrive Support**: Full file operations
-- **Batch Operations**: Upload/download multiple files
-- **Search**: Content and metadata search
-
-### Contact Management
-- **Full CRUD Operations**: Create, read, update, delete contacts
-- **Advanced Search**: Search by name, email, company, or any contact field
-- **Complete Contact Fields**: Support for emails, phones, addresses, birthdays, notes
-- **Folder Management**: Organize contacts in folders
-- **Bulk Operations**: Handle multiple contacts efficiently
-
-### Task Management (Planner)
-- **Plan Operations**: Create and manage plans
-- **Task Assignment**: User lookup and assignment
-- **Bucket Organization**: Group tasks efficiently
-- **Bulk Operations**: Update/delete multiple tasks
+All tools are wrapped with `safeTool()` which provides:
+- Consistent `isError: true` responses for failures
+- Context-tagged messages (e.g., `[calendar.create] Error: ...`)
+- Actionable hints for common Graph API errors (401, 403, 404, 429)
 
 ## Azure App Registration & Configuration
 
@@ -125,28 +116,24 @@ To use this MCP server you need to first register and configure an app in Azure 
     - User.Read
     - User.ReadWrite
     - User.ReadBasic.All
-    - Mail.Read
     - Mail.ReadWrite
     - Mail.Send
-    - Calendars.Read
+    - Mail.ReadWrite.Shared
+    - Mail.Send.Shared
+    - MailboxSettings.ReadWrite
     - Calendars.ReadWrite
     - Contacts.ReadWrite
-    - Files.Read
-    - Files.ReadWrite
     - Files.ReadWrite.All
     - Team.ReadBasic.All
     - Team.Create
-    - Chat.Read
     - Chat.ReadWrite
     - ChannelMessage.Read.All
     - ChannelMessage.Send
     - OnlineMeetingTranscript.Read.All
     - OnlineMeetings.ReadWrite
-    - Tasks.Read
     - Tasks.ReadWrite
     - Group.Read.All
     - Directory.Read.All
-    - Presence.Read
     - Presence.ReadWrite
 6. Click on "Add permissions"
 
@@ -183,7 +170,7 @@ SHAREPOINT_SYMLINK_PATH=/path/to/sharepoint/symlink
 
 # Server settings
 USE_TEST_MODE=false
-TRANSPORT_TYPE=stdio  # or 'http' for headless
+TRANSPORT_TYPE=stdio  # or 'http' for SSE headless mode
 HTTP_PORT=3333
 HTTP_HOST=127.0.0.1
 ```
@@ -215,7 +202,7 @@ HTTP_HOST=127.0.0.1
 
 3. Restart Claude Desktop
 
-4. In Claude, use the `authenticate` tool to connect to Microsoft 365
+4. In Claude, use the `system` tool with `operation: "authenticate"` to connect to Microsoft 365
 
 ## Testing
 
@@ -231,13 +218,17 @@ Enable test mode to use mock data without API calls:
 USE_TEST_MODE=true node index.js
 ```
 
+### Unit Tests
+```bash
+npm test
+```
+
 ## Authentication Flow
 
 1. Start the authentication server:
-   - Windows: Run `start-auth-server.bat` or `run-office-mcp.bat`
-   - Unix/Linux/macOS: Run `./start-auth-server.sh`
+   - Run `./start-auth-server.sh` (or use `npm run auth-server`)
 2. The auth server runs on port 3000 and handles OAuth callbacks
-3. In Claude, use the `authenticate` tool to get an authentication URL
+3. In Claude, use the `system` tool with `operation: "authenticate"` to get an authentication URL
 4. Complete the authentication in your browser
 5. Tokens are stored in `~/.office-mcp-tokens.json`
 
@@ -246,11 +237,13 @@ USE_TEST_MODE=true node index.js
 ### Automatic Token Refresh
 After initial authentication, the server automatically refreshes tokens without user interaction.
 
-### HTTP Transport Mode
-For headless environments, use HTTP transport:
+### HTTP/SSE Transport Mode
+For headless environments, use SSE transport:
 ```bash
 TRANSPORT_TYPE=http HTTP_PORT=3333 node index.js
 ```
+
+The server exposes `/sse` (GET) for SSE connections and `/message` (POST) for client messages.
 
 ### Windows Service (Optional)
 For Windows background operation:

@@ -6,6 +6,7 @@
 const { ensureAuthenticated } = require('../auth');
 const { callGraphAPI } = require('../utils/graph-api');
 const config = require('../config');
+const { safeTool } = require('../utils/errors');
 
 /**
  * Unified calendar handler for all calendar operations
@@ -443,7 +444,7 @@ const calendarTools = [
       },
       required: ["operation"]
     },
-    handler: handleCalendar
+    handler: safeTool('calendar', handleCalendar)
   }
 ];
 

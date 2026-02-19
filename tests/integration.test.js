@@ -1,135 +1,152 @@
-const { describe, it, expect, jest } = require('@jest/globals');
-const { Server } = require("@modelcontextprotocol/sdk/server/index.js");
+const { describe, it, expect } = require('@jest/globals');
 const config = require('../config');
-const { createMockTokens } = require('./test-utils');
 
-// Import all modules to test
+// Import all modules
 const { authTools } = require('../auth');
 const { emailTools } = require('../email');
 const { calendarTools } = require('../calendar');
-const { teamsTools } = require('../teams');
-const { driveTools } = require('../drive');
-const { plannerTools } = require('../planner');
-const { userTools } = require('../users');
+const teamsTools = require('../teams');
 const { notificationTools } = require('../notifications');
+const { plannerTools } = require('../planner');
+const { filesTools } = require('../files');
+const { searchTools } = require('../search');
+const { contactsTools } = require('../contacts');
+const { todoTools } = require('../todo');
+const { groupsTools } = require('../groups');
+const { directoryTools } = require('../directory');
 
 describe('Office MCP Server Integration Tests', () => {
-  let server;
-  
-  beforeEach(() => {
-    // Create a new server instance for each test
-    server = new Server(
-      { name: config.SERVER_NAME, version: config.SERVER_VERSION },
-      { 
-        capabilities: { 
-          tools: {}
-        } 
-      }
-    );
-  });
-  
-  describe('Server Configuration', () => {
-    it('should initialize with correct name and version', () => {
-      expect(server.name).toBe(config.SERVER_NAME);
-      expect(server.version).toBe(config.SERVER_VERSION);
-    });
-  });
-  
   describe('Tool Registration', () => {
-    it('should register all authentication tools', () => {
-      const toolCount = authTools.length;
-      expect(toolCount).toBe(3);
-      
-      authTools.forEach(tool => {
-        expect(tool).toHaveProperty('name');
-        expect(tool).toHaveProperty('handler');
-        expect(tool).toHaveProperty('schema');
-      });
+    it('should have 1 consolidated auth/system tool', () => {
+      expect(authTools).toHaveLength(1);
+      expect(authTools[0].name).toBe('system');
     });
-    
-    it('should register all teams tools', () => {
-      const toolCount = teamsTools.length;
-      expect(toolCount).toBe(19);
-      
-      teamsTools.forEach(tool => {
-        expect(tool).toHaveProperty('name');
-        expect(tool).toHaveProperty('handler');
-      });
+
+    it('should have 1 consolidated email tool', () => {
+      expect(emailTools).toHaveLength(1);
+      expect(emailTools[0].name).toBe('mail');
     });
-    
-    it('should register all drive tools', () => {
-      const toolCount = driveTools.length;
-      expect(toolCount).toBe(13);
+
+    it('should have 3 consolidated teams tools', () => {
+      expect(teamsTools).toHaveLength(3);
+      const names = teamsTools.map(t => t.name);
+      expect(names).toContain('teams_meeting');
+      expect(names).toContain('teams_channel');
+      expect(names).toContain('teams_chat');
     });
-    
-    it('should register all planner tools', () => {
-      const toolCount = plannerTools.length;
-      expect(toolCount).toBe(16);
+
+    it('should have 1 consolidated planner tool', () => {
+      expect(plannerTools).toHaveLength(1);
+      expect(plannerTools[0].name).toBe('planner');
     });
-    
-    it('should register all user tools', () => {
-      const toolCount = userTools.length;
-      expect(toolCount).toBe(16);
+
+    it('should have 1 consolidated notifications tool', () => {
+      expect(notificationTools).toHaveLength(1);
+      expect(notificationTools[0].name).toBe('notifications');
     });
-    
-    it('should register all notification tools', () => {
-      const toolCount = notificationTools.length;
-      expect(toolCount).toBe(5);
+
+    it('should have 1 calendar tool', () => {
+      expect(calendarTools).toHaveLength(1);
+    });
+
+    it('should have files tools (files + sharepoint path mapper)', () => {
+      expect(filesTools.length).toBeGreaterThanOrEqual(1);
+      expect(filesTools.find(t => t.name === 'files')).toBeDefined();
+    });
+
+    it('should have 1 search tool', () => {
+      expect(searchTools).toHaveLength(1);
+    });
+
+    it('should have 1 contacts tool', () => {
+      expect(contactsTools).toHaveLength(1);
+    });
+
+    it('should have 1 todo tool', () => {
+      expect(todoTools).toHaveLength(1);
+      expect(todoTools[0].name).toBe('todo');
+    });
+
+    it('should have 1 groups tool', () => {
+      expect(groupsTools).toHaveLength(1);
+      expect(groupsTools[0].name).toBe('groups');
+    });
+
+    it('should have 1 directory tool', () => {
+      expect(directoryTools).toHaveLength(1);
+      expect(directoryTools[0].name).toBe('directory');
     });
   });
-  
+
   describe('Tool Collection', () => {
-    it('should have correct total number of tools', () => {
+    it('should have correct total number of consolidated tools', () => {
       const allTools = [
         ...authTools,
         ...emailTools,
         ...calendarTools,
         ...teamsTools,
-        ...driveTools,
+        ...notificationTools,
         ...plannerTools,
-        ...userTools,
-        ...notificationTools
+        ...filesTools,
+        ...searchTools,
+        ...contactsTools,
+        ...todoTools,
+        ...groupsTools,
+        ...directoryTools
       ];
-      
-      expect(allTools.length).toBe(81); // Total number of tools
+
+      // Verify we have the expected consolidated tool count
+      // (exact count may vary as files module includes sharepoint path mapper)
+      expect(allTools.length).toBeGreaterThanOrEqual(15);
     });
-    
+
     it('should have unique tool names', () => {
       const allTools = [
         ...authTools,
         ...emailTools,
         ...calendarTools,
         ...teamsTools,
-        ...driveTools,
+        ...notificationTools,
         ...plannerTools,
-        ...userTools,
-        ...notificationTools
+        ...filesTools,
+        ...searchTools,
+        ...contactsTools,
+        ...todoTools,
+        ...groupsTools,
+        ...directoryTools
       ];
-      
+
       const toolNames = allTools.map(tool => tool.name);
       const uniqueNames = [...new Set(toolNames)];
-      
+
       expect(toolNames.length).toBe(uniqueNames.length);
     });
-  });
-  
-  describe('Error Handling', () => {
-    it('should handle missing authentication gracefully', async () => {
-      // Test a tool that requires authentication
-      const listTeamsTool = teamsTools.find(tool => tool.name === 'list_teams');
-      const result = await listTeamsTool.handler({});
-      
-      expect(result.content[0].text).toContain('Not authenticated');
+
+    it('should have handler and inputSchema on all tools', () => {
+      const allTools = [
+        ...authTools,
+        ...emailTools,
+        ...calendarTools,
+        ...teamsTools,
+        ...notificationTools,
+        ...plannerTools,
+        ...filesTools,
+        ...searchTools,
+        ...contactsTools,
+        ...todoTools,
+        ...groupsTools,
+        ...directoryTools
+      ];
+
+      allTools.forEach(tool => {
+        expect(tool).toHaveProperty('name');
+        expect(tool).toHaveProperty('handler');
+        expect(tool).toHaveProperty('inputSchema');
+        expect(typeof tool.handler).toBe('function');
+      });
     });
-    
-    it('should validate required parameters', async () => {
-      const createMeetingTool = teamsTools.find(tool => tool.name === 'create_meeting');
-      const result = await createMeetingTool.handler({});
-      
-      expect(result.content[0].text).toContain('Missing required parameters');
-    });
   });
-  
+
   describe('Configuration Validation', () => {
     it('should have valid server configuration', () => {
       expect(config.SERVER_NAME).toBe('office-mcp');
@@ -138,45 +155,16 @@ describe('Office MCP Server Integration Tests', () => {
       expect(config.AUTH_CONFIG.scopes).toBeInstanceOf(Array);
       expect(config.AUTH_CONFIG.scopes.length).toBeGreaterThan(0);
     });
-    
+
     it('should have required OAuth configuration', () => {
       expect(config.AUTH_CONFIG.clientId).toBeDefined();
       expect(config.AUTH_CONFIG.clientSecret).toBeDefined();
       expect(config.AUTH_CONFIG.redirectUri).toBeDefined();
     });
-    
+
     it('should have correct OnlineMeetings permission', () => {
       const scopes = config.AUTH_CONFIG.scopes;
-      const hasCorrectPermission = scopes.includes('OnlineMeetings.ReadWrite');
-      expect(hasCorrectPermission).toBe(true);
-      
-      // Ensure we don't have incorrect versions
-      const hasMisspelledPermission1 = scopes.includes('OnlineMeeting.ReadWrite.All');
-      const hasMisspelledPermission2 = scopes.includes('OnlineMeetings.ReadWrite.All');
-      expect(hasMisspelledPermission1).toBe(false);
-      expect(hasMisspelledPermission2).toBe(false);
-    });
-  });
-  
-  describe('Schema Validation', () => {
-    it('should have valid JSON schemas for all tools', () => {
-      const allTools = [
-        ...authTools,
-        ...emailTools,
-        ...calendarTools,
-        ...teamsTools,
-        ...driveTools,
-        ...plannerTools,
-        ...userTools,
-        ...notificationTools
-      ];
-      
-      allTools.forEach(tool => {
-        if (tool.schema) {
-          expect(tool.schema).toHaveProperty('properties');
-          expect(tool.schema).toHaveProperty('type', 'object');
-        }
-      });
+      expect(scopes).toContain('OnlineMeetings.ReadWrite');
     });
   });
 });

@@ -1,5 +1,3 @@
-const { jest } = require('@jest/globals');
-
 /**
  * Creates a mock token object for testing
  */

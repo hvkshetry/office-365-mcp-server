@@ -13,6 +13,7 @@
 const handleTeamsMeeting = require('./teams_meeting');
 const handleTeamsChannel = require('./teams_channel');
 const handleTeamsChat = require('./teams_chat');
+const { safeTool } = require('../../utils/errors');
 
 // Define the tool schemas
 const meetingToolSchema = {
@@ -69,18 +70,18 @@ module.exports = [
     name: 'teams_meeting',
     description: 'Teams meeting operations: create, update, cancel, find, list transcripts, get recordings, and more',
     inputSchema: meetingToolSchema,
-    handler: handleTeamsMeeting
+    handler: safeTool('teams_meeting', handleTeamsMeeting)
   },
   {
     name: 'teams_channel',
     description: 'Teams channel operations: list, create, get, update, delete channels and manage messages, members, and tabs',
     inputSchema: channelToolSchema,
-    handler: handleTeamsChannel
+    handler: safeTool('teams_channel', handleTeamsChannel)
   },
   {
     name: 'teams_chat',
     description: 'Teams chat operations: list, create, get, update, delete chats and manage messages and members',
     inputSchema: chatToolSchema,
-    handler: handleTeamsChat
+    handler: safeTool('teams_chat', handleTeamsChat)
   }
 ];

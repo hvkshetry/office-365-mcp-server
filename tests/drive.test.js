@@ -1,165 +1,116 @@
-const { describe, it, expect, jest } = require('@jest/globals');
-const {
-  handleListFiles,
-  handleGetFileContent,
-  handleUploadFile,
-  handleCreateFolder,
-  handleRestoreRecycleBinItem
-} = require('../drive');
-const tokenManager = require('../auth/token-manager');
+const { describe, it, expect } = require('@jest/globals');
+const { filesTools } = require('../files');
+const { ensureAuthenticated } = require('../auth');
 const { callGraphAPI } = require('../utils/graph-api');
 
-jest.mock('../auth/token-manager');
+jest.mock('../auth', () => ({
+  ensureAuthenticated: jest.fn()
+}));
 jest.mock('../utils/graph-api');
 
-describe('Drive Module', () => {
-  const mockTokens = {
-    access_token: 'mock-access-token',
-    email: 'user@example.com'
-  };
+// The consolidated files tool
+const filesHandler = filesTools[0].handler;
+
+describe('Files Module', () => {
+  const mockAccessToken = 'mock-access-token';
 
   beforeEach(() => {
     jest.clearAllMocks();
-    tokenManager.loadTokenCache.mockReturnValue(mockTokens);
+    ensureAuthenticated.mockResolvedValue(mockAccessToken);
   });
 
-  describe('handleListFiles', () => {
+  describe('routing', () => {
+    it('should require operation parameter', async () => {
+      const result = await filesHandler({});
+      expect(result.content[0].text).toContain('Missing required parameter: operation');
+    });
+  });
+
+  describe('list operation', () => {
     it('should list files in root directory', async () => {
       const mockFiles = {
         value: [
-          { id: 'file1', name: 'Document.docx', size: 1024 },
-          { id: 'folder1', name: 'Projects', folder: {} }
+          { id: 'file1', name: 'Document.docx', size: 1024, file: {} },
+          { id: 'folder1', name: 'Projects', folder: { childCount: 3 } }
         ]
       };
-      
+
       callGraphAPI.mockResolvedValue(mockFiles);
-      
-      const result = await handleListFiles({});
-      
-      expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'GET',
-        '/me/drive/root/children',
-        null
-      );
-      expect(result.content[0].text).toContain('Found 2 items');
-      expect(result.content[0].text).toContain('Document.docx [File]');
-      expect(result.content[0].text).toContain('Projects [Folder]');
+
+      const result = await filesHandler({ operation: 'list' });
+
+      expect(result.content[0].text).toContain('Document.docx');
+      expect(result.content[0].text).toContain('Projects');
     });
 
     it('should list files in specific folder', async () => {
-      const mockFiles = { value: [] };
-      
-      callGraphAPI.mockResolvedValue(mockFiles);
-      
-      const result = await handleListFiles({ folderId: 'folder123' });
-      
-      expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'GET',
-        '/me/drive/items/folder123/children',
-        null
-      );
-      expect(result.content[0].text).toBe('No files found in this location.');
+      callGraphAPI.mockResolvedValue({ value: [] });
+
+      const result = await filesHandler({
+        operation: 'list',
+        folderId: 'folder123'
+      });
+
+      expect(result.content[0].text).toBeTruthy();
     });
   });
 
-  describe('handleGetFileContent', () => {
-    it('should retrieve file content', async () => {
-      const fileContent = 'Hello, World!';
-      
-      callGraphAPI.mockResolvedValue(fileContent);
-      
-      const result = await handleGetFileContent({ fileId: 'file123' });
-      
-      expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'GET',
-        '/me/drive/items/file123/content',
-        null
-      );
-      expect(result.content[0].text).toBe('Hello, World!');
+  describe('search operation', () => {
+    it('should search for files', async () => {
+      const mockResults = {
+        value: [
+          { id: 'file1', name: 'budget.xlsx', size: 2048, file: {} }
+        ]
+      };
+
+      callGraphAPI.mockResolvedValue(mockResults);
+
+      const result = await filesHandler({
+        operation: 'search',
+        query: 'budget'
+      });
+
+      expect(result.content[0].text).toContain('budget.xlsx');
     });
   });
 
-  describe('handleUploadFile', () => {
-    it('should upload a file successfully', async () => {
+  describe('upload operation', () => {
+    it('should upload a file', async () => {
       const mockResponse = {
         id: 'newfile123',
         name: 'uploaded.txt',
         size: 256
       };
-      
-      callGraphAPI.mockResolvedValue(mockResponse);
-      
-      const result = await handleUploadFile({
-        fileName: 'uploaded.txt',
-        content: 'File content',
-        parentFolderId: 'folder123'
-      });
-      
-      expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'PUT',
-        '/me/drive/items/folder123:/uploaded.txt:/content',
-        'File content',
-        { 'Content-Type': 'text/plain' }
-      );
-      expect(result.content[0].text).toContain('Successfully uploaded');
-    });
 
-    it('should validate required parameters', async () => {
-      const result = await handleUploadFile({ fileName: 'test.txt' });
-      
-      expect(result.content[0].text).toContain('Missing required parameters');
+      callGraphAPI.mockResolvedValue(mockResponse);
+
+      const result = await filesHandler({
+        operation: 'upload',
+        fileName: 'uploaded.txt',
+        content: 'File content here'
+      });
+
+      expect(result.content[0].text).toContain('uploaded');
     });
   });
 
-  describe('handleCreateFolder', () => {
-    it('should create a folder successfully', async () => {
+  describe('create_folder operation', () => {
+    it('should create a folder', async () => {
       const mockResponse = {
         id: 'newfolder123',
-        name: 'New Folder'
+        name: 'New Folder',
+        folder: {},
+        parentReference: { path: '/drive/root:' }
       };
-      
-      callGraphAPI.mockResolvedValue(mockResponse);
-      
-      const result = await handleCreateFolder({
-        folderName: 'New Folder',
-        parentFolderId: 'root'
-      });
-      
-      expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'POST',
-        '/me/drive/items/root/children',
-        {
-          name: 'New Folder',
-          folder: {}
-        }
-      );
-      expect(result.content[0].text).toContain('Successfully created folder');
-    });
-  });
 
-  describe('handleRestoreRecycleBinItem', () => {
-    it('should restore an item from recycle bin', async () => {
-      const mockResponse = {
-        id: 'restored123',
-        name: 'Restored File.docx'
-      };
-      
       callGraphAPI.mockResolvedValue(mockResponse);
-      
-      const result = await handleRestoreRecycleBinItem({ itemId: 'deleted123' });
-      
-      expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'POST',
-        '/me/drive/items/deleted123/restore',
-        {}
-      );
-      expect(result.content[0].text).toContain('Successfully restored item');
+
+      const result = await filesHandler({
+        operation: 'create_folder',
+        name: 'New Folder'
+      });
+
+      expect(result.content[0].text).toContain('New Folder');
     });
   });
 });

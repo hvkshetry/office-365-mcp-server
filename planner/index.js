@@ -1,5 +1,6 @@
 const { ensureAuthenticated } = require('../auth');
 const { callGraphAPI } = require('../utils/graph-api');
+const { safeTool } = require('../utils/errors');
 
 /**
  * Consolidated Planner Module - Reduces 18 tools to 8 tools
@@ -60,18 +61,18 @@ async function handlePlanOperations(args) {
         const updateData = {};
         if (title) updateData.title = title;
         
-        await callGraphAPI(accessToken, 'PATCH', `planner/plans/${planId}`, updateData, {
+        await callGraphAPI(accessToken, 'PATCH', `planner/plans/${planId}`, updateData, null, {
           'If-Match': currentPlan['@odata.etag']
         });
-        
+
         return { content: [{ type: "text", text: "Plan updated successfully!" }] };
-      
+
       case 'delete':
         if (!planId) throw new Error("Plan ID required for delete operation");
-        
+
         const planToDelete = await callGraphAPI(accessToken, 'GET', `planner/plans/${planId}`, null);
-        
-        await callGraphAPI(accessToken, 'DELETE', `planner/plans/${planId}`, null, {
+
+        await callGraphAPI(accessToken, 'DELETE', `planner/plans/${planId}`, null, null, {
           'If-Match': planToDelete['@odata.etag']
         });
         
@@ -257,18 +258,18 @@ async function handleBucketOperations(args) {
         const updateData = {};
         if (name) updateData.name = name;
         
-        await callGraphAPI(accessToken, 'PATCH', `planner/buckets/${bucketId}`, updateData, {
+        await callGraphAPI(accessToken, 'PATCH', `planner/buckets/${bucketId}`, updateData, null, {
           'If-Match': currentBucket['@odata.etag']
         });
-        
+
         return { content: [{ type: "text", text: "Bucket updated successfully!" }] };
-      
+
       case 'delete':
         if (!bucketId) throw new Error("Bucket ID required for delete operation");
-        
+
         const bucketToDelete = await callGraphAPI(accessToken, 'GET', `planner/buckets/${bucketId}`, null);
-        
-        await callGraphAPI(accessToken, 'DELETE', `planner/buckets/${bucketId}`, null, {
+
+        await callGraphAPI(accessToken, 'DELETE', `planner/buckets/${bucketId}`, null, null, {
           'If-Match': bucketToDelete['@odata.etag']
         });
         
@@ -614,192 +615,144 @@ async function handleBulkOperations(args) {
   }
 }
 
-// Export consolidated tools
+/**
+ * Unified planner handler - single entry point for ALL planner operations
+ * Uses entity + operation routing to consolidate 8 tools into 1
+ */
+async function handlePlanner(args) {
+  if (!args || typeof args !== 'object') {
+    return {
+      content: [{
+        type: "text",
+        text: "Invalid args: expected an object with 'entity' and 'operation' parameters"
+      }]
+    };
+  }
+
+  const { entity, operation, ...params } = args;
+
+  if (!entity || !operation) {
+    return {
+      content: [{
+        type: "text",
+        text: "Missing required parameters: entity and operation.\nEntities: plan, task, bucket, user\nPlan operations: list, get, create, update, delete\nTask operations: list, create, update, delete, get, assign, get_details, update_assignments, bulk_update, bulk_delete\nBucket operations: list, create, update, delete, get_tasks\nUser operations: lookup"
+      }]
+    };
+  }
+
+  switch (entity) {
+    case 'plan':
+      return await handlePlanOperations({ operation, ...params });
+
+    case 'task':
+      // Route to appropriate task handler based on operation
+      switch (operation) {
+        case 'list':
+        case 'create':
+        case 'update':
+        case 'delete':
+        case 'get':
+        case 'assign':
+          return await handleTaskOperations({ operation, ...params });
+        case 'get_details':
+          return await handleTaskDetails(params);
+        case 'update_assignments':
+          return await handleTaskEnhanced({ operation: 'update_assignments', ...params });
+        case 'bulk_update':
+          return await handleBulkOperations({ operation: 'update', ...params });
+        case 'bulk_delete':
+          return await handleBulkOperations({ operation: 'delete', ...params });
+        case 'get_assignments':
+          return await handleTaskAssignments({ operation: 'get', ...params });
+        default:
+          return {
+            content: [{
+              type: "text",
+              text: `Invalid task operation: ${operation}. Valid: list, create, update, delete, get, assign, get_details, update_assignments, get_assignments, bulk_update, bulk_delete`
+            }]
+          };
+      }
+
+    case 'bucket':
+      return await handleBucketOperations({ operation, ...params });
+
+    case 'user':
+      return await handleUserLookup(params);
+
+    default:
+      return {
+        content: [{
+          type: "text",
+          text: `Invalid entity: ${entity}. Valid entities: plan, task, bucket, user`
+        }]
+      };
+  }
+}
+
+// Export single consolidated tool
 const plannerTools = [
   {
-    name: 'planner_plan',
-    description: 'Handle plan operations (list, get, create, update, delete)',
+    name: 'planner',
+    description: 'Unified Microsoft Planner management: plans, tasks, buckets, and user lookups. Use entity + operation routing.',
     inputSchema: {
       type: 'object',
       properties: {
-        operation: { 
-          type: 'string', 
-          enum: ['list', 'get', 'create', 'update', 'delete'],
-          description: 'Operation to perform' 
+        entity: {
+          type: 'string',
+          enum: ['plan', 'task', 'bucket', 'user'],
+          description: 'The entity type to operate on'
         },
-        planId: { type: 'string', description: 'Plan ID (required for get, update, delete)' },
-        title: { type: 'string', description: 'Plan title (required for create, optional for update)' },
-        groupId: { type: 'string', description: 'Microsoft 365 group ID (required for create)' }
-      },
-      required: ['operation']
-    },
-    handler: handlePlanOperations
-  },
-  {
-    name: 'planner_task',
-    description: 'Handle task operations (list, create, update, delete, get, assign)',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        operation: { 
-          type: 'string', 
-          enum: ['list', 'create', 'update', 'delete', 'get', 'assign'],
-          description: 'Operation to perform' 
+        operation: {
+          type: 'string',
+          description: 'Operation to perform. Plan: list/get/create/update/delete. Task: list/create/update/delete/get/assign/get_details/update_assignments/get_assignments/bulk_update/bulk_delete. Bucket: list/create/update/delete/get_tasks. User: lookup.'
         },
-        planId: { type: 'string', description: 'Plan ID (required for list, create)' },
-        taskId: { type: 'string', description: 'Task ID (required for update, delete, get, assign)' },
-        title: { type: 'string', description: 'Task title' },
-        bucketId: { type: 'string', description: 'Bucket ID' },
-        dueDateTime: { type: 'string', description: 'Due date in ISO 8601 format' },
-        assignedTo: { 
-          oneOf: [
-            { type: 'string' },
-            { type: 'array', items: { type: 'string' } }
-          ],
-          description: 'User ID(s) to assign' 
-        },
-        percentComplete: { type: 'number', description: 'Completion percentage (0-100)' }
-      },
-      required: ['operation']
-    },
-    handler: handleTaskOperations
-  },
-  {
-    name: 'planner_bucket',
-    description: 'Handle bucket operations (list, create, update, delete, get_tasks)',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        operation: { 
-          type: 'string', 
-          enum: ['list', 'create', 'update', 'delete', 'get_tasks'],
-          description: 'Operation to perform' 
-        },
-        planId: { type: 'string', description: 'Plan ID (required for list, create)' },
-        bucketId: { type: 'string', description: 'Bucket ID (required for update, delete, get_tasks)' },
-        name: { type: 'string', description: 'Bucket name' },
-        orderHint: { type: 'string', description: 'Order hint for bucket positioning' }
-      },
-      required: ['operation']
-    },
-    handler: handleBucketOperations
-  },
-  {
-    name: 'planner_user',
-    description: 'Handle user lookup operations (get single or multiple user IDs)',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        email: { type: 'string', description: 'Single user email address' },
-        emails: { 
-          type: 'array', 
-          items: { type: 'string' },
-          description: 'Array of user email addresses' 
-        }
-      }
-    },
-    handler: handleUserLookup
-  },
-  {
-    name: 'planner_task_enhanced',
-    description: 'Enhanced task operations with better assignment handling',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        operation: { 
-          type: 'string', 
-          enum: ['create', 'update_assignments'],
-          description: 'Operation to perform' 
-        },
-        planId: { type: 'string', description: 'Plan ID (required for create)' },
-        taskId: { type: 'string', description: 'Task ID (required for update_assignments)' },
-        title: { type: 'string', description: 'Task title' },
-        bucketId: { type: 'string', description: 'Bucket ID' },
-        dueDateTime: { type: 'string', description: 'Due date in ISO 8601 format' },
-        assignedTo: { 
-          oneOf: [
-            { type: 'string' },
-            { type: 'array', items: { type: 'string' } }
-          ],
-          description: 'User ID(s) to assign' 
-        },
-        removeAssignments: { 
-          oneOf: [
-            { type: 'string' },
-            { type: 'array', items: { type: 'string' } }
-          ],
-          description: 'User ID(s) to unassign' 
-        },
-        percentComplete: { type: 'number', description: 'Completion percentage (0-100)' }
-      },
-      required: ['operation']
-    },
-    handler: handleTaskEnhanced
-  },
-  {
-    name: 'planner_assignments',
-    description: 'Handle task assignments (get, update)',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        operation: { 
-          type: 'string', 
-          enum: ['get', 'update'],
-          description: 'Operation to perform' 
-        },
+        // Plan parameters
+        planId: { type: 'string', description: 'Plan ID' },
+        title: { type: 'string', description: 'Plan/Task title' },
+        groupId: { type: 'string', description: 'Microsoft 365 group ID (for plan create)' },
+        // Task parameters
         taskId: { type: 'string', description: 'Task ID' },
-        userId: { type: 'string', description: 'Single user ID to assign' },
-        userIds: { 
-          type: 'array', 
-          items: { type: 'string' },
-          description: 'Multiple user IDs to assign' 
-        }
-      },
-      required: ['operation', 'taskId']
-    },
-    handler: handleTaskAssignments
-  },
-  {
-    name: 'planner_task_details',
-    description: 'Get detailed task information',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        taskId: { type: 'string', description: 'Task ID' }
-      },
-      required: ['taskId']
-    },
-    handler: handleTaskDetails
-  },
-  {
-    name: 'planner_bulk_operations',
-    description: 'Handle bulk operations for tasks',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        operation: { 
-          type: 'string', 
-          enum: ['update', 'delete'],
-          description: 'Operation to perform' 
+        bucketId: { type: 'string', description: 'Bucket ID' },
+        dueDateTime: { type: 'string', description: 'Due date in ISO 8601 format' },
+        assignedTo: {
+          oneOf: [
+            { type: 'string' },
+            { type: 'array', items: { type: 'string' } }
+          ],
+          description: 'User ID(s) to assign'
         },
-        taskIds: { 
-          type: 'array', 
-          items: { type: 'string' },
-          description: 'Array of task IDs to process' 
+        removeAssignments: {
+          oneOf: [
+            { type: 'string' },
+            { type: 'array', items: { type: 'string' } }
+          ],
+          description: 'User ID(s) to unassign (for update_assignments)'
         },
+        percentComplete: { type: 'number', description: 'Completion percentage (0-100)' },
+        // Bucket parameters
+        name: { type: 'string', description: 'Bucket name' },
+        orderHint: { type: 'string', description: 'Order hint for bucket positioning' },
+        // User parameters
+        email: { type: 'string', description: 'Single user email address (for user lookup)' },
+        emails: { type: 'array', items: { type: 'string' }, description: 'Multiple user email addresses (for user lookup)' },
+        // Bulk parameters
+        taskIds: { type: 'array', items: { type: 'string' }, description: 'Task IDs (for bulk operations)' },
         updates: {
           type: 'object',
           properties: {
-            percentComplete: { type: 'number', description: 'Completion percentage (0-100)' },
-            bucketId: { type: 'string', description: 'Bucket ID' },
-            dueDateTime: { type: 'string', description: 'Due date in ISO 8601 format' }
+            percentComplete: { type: 'number' },
+            bucketId: { type: 'string' },
+            dueDateTime: { type: 'string' }
           },
-          description: 'Update data (for update operation)'
-        }
+          description: 'Update data (for bulk_update)'
+        },
+        // Assignment parameters
+        userId: { type: 'string', description: 'Single user ID (for assignment operations)' },
+        userIds: { type: 'array', items: { type: 'string' }, description: 'Multiple user IDs (for assignment operations)' }
       },
-      required: ['operation', 'taskIds']
+      required: ['entity', 'operation']
     },
-    handler: handleBulkOperations
+    handler: safeTool('planner', handlePlanner)
   }
 ];
 

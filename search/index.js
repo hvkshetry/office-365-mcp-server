@@ -6,6 +6,7 @@
 const { ensureAuthenticated } = require('../auth');
 const { callGraphAPI } = require('../utils/graph-api');
 const config = require('../config');
+const { safeTool } = require('../utils/errors');
 
 /**
  * Main search handler - single entry point for all search operations
@@ -892,7 +893,7 @@ const searchTools = [
       },
       required: ["query"]
     },
-    handler: handleSearch
+    handler: safeTool('search', handleSearch)
   }
 ];
 

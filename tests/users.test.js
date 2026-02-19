@@ -1,203 +1,191 @@
-const { describe, it, expect, jest } = require('@jest/globals');
-const {
-  handleGetMyProfile,
-  handleGetUserProfile,
-  handleSearchUsers,
-  handleListDirectReports,
-  handleGetPresence,
-  handleUpdatePresence
-} = require('../users');
-const tokenManager = require('../auth/token-manager');
+const { describe, it, expect } = require('@jest/globals');
+const { directoryTools } = require('../directory');
+const { ensureAuthenticated } = require('../auth');
 const { callGraphAPI } = require('../utils/graph-api');
 
-jest.mock('../auth/token-manager');
+jest.mock('../auth', () => ({
+  ensureAuthenticated: jest.fn()
+}));
 jest.mock('../utils/graph-api');
 
-describe('Users Module', () => {
-  const mockTokens = {
-    access_token: 'mock-access-token',
-    email: 'user@example.com'
-  };
+// The consolidated directory tool
+const directoryHandler = directoryTools[0].handler;
+
+describe('Directory Module', () => {
+  const mockAccessToken = 'mock-access-token';
 
   beforeEach(() => {
     jest.clearAllMocks();
-    tokenManager.loadTokenCache.mockReturnValue(mockTokens);
+    ensureAuthenticated.mockResolvedValue(mockAccessToken);
   });
 
-  describe('handleGetMyProfile', () => {
-    it('should get current user profile', async () => {
-      const mockProfile = {
+  describe('routing', () => {
+    it('should require operation parameter', async () => {
+      const result = await directoryHandler({});
+      expect(result.content[0].text).toContain('Missing required parameter: operation');
+    });
+
+    it('should reject invalid operation', async () => {
+      const result = await directoryHandler({ operation: 'invalid' });
+      expect(result.content[0].text).toContain('Invalid operation');
+    });
+  });
+
+  describe('lookup_user operation', () => {
+    it('should look up user by email', async () => {
+      const mockUser = {
         id: 'user123',
         displayName: 'John Doe',
-        userPrincipalName: 'john.doe@example.com',
         mail: 'john.doe@example.com',
-        jobTitle: 'Software Engineer'
+        jobTitle: 'Software Engineer',
+        department: 'Engineering'
       };
-      
-      callGraphAPI.mockResolvedValue(mockProfile);
-      
-      const result = await handleGetMyProfile({});
-      
+
+      callGraphAPI.mockResolvedValue(mockUser);
+
+      const result = await directoryHandler({
+        operation: 'lookup_user',
+        email: 'john.doe@example.com'
+      });
+
       expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
+        mockAccessToken,
         'GET',
-        '/me',
-        null
+        'users/john.doe@example.com',
+        null,
+        expect.any(Object)
       );
       expect(result.content[0].text).toContain('John Doe');
       expect(result.content[0].text).toContain('Software Engineer');
     });
+
+    it('should require email or userId', async () => {
+      const result = await directoryHandler({ operation: 'lookup_user' });
+      expect(result.content[0].text).toContain('Missing required parameter');
+    });
   });
 
-  describe('handleGetUserProfile', () => {
-    it('should get specific user profile by ID', async () => {
+  describe('get_profile operation', () => {
+    it('should get current user profile', async () => {
+      const mockProfile = {
+        id: 'user123',
+        displayName: 'John Doe',
+        mail: 'john.doe@example.com',
+        jobTitle: 'Engineer'
+      };
+
+      callGraphAPI.mockResolvedValue(mockProfile);
+
+      const result = await directoryHandler({ operation: 'get_profile' });
+
+      expect(callGraphAPI).toHaveBeenCalledWith(
+        mockAccessToken, 'GET', 'me', null, expect.any(Object)
+      );
+      expect(result.content[0].text).toContain('John Doe');
+    });
+
+    it('should get specific user profile', async () => {
       const mockProfile = {
         id: 'user456',
         displayName: 'Jane Smith',
-        userPrincipalName: 'jane.smith@example.com'
+        mail: 'jane.smith@example.com'
       };
-      
+
       callGraphAPI.mockResolvedValue(mockProfile);
-      
-      const result = await handleGetUserProfile({ userId: 'user456' });
-      
+
+      const result = await directoryHandler({
+        operation: 'get_profile',
+        userId: 'user456'
+      });
+
       expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'GET',
-        '/users/user456',
-        null
+        mockAccessToken, 'GET', 'users/user456', null, expect.any(Object)
       );
       expect(result.content[0].text).toContain('Jane Smith');
     });
+  });
 
-    it('should get user profile by email', async () => {
-      const mockProfile = {
-        displayName: 'Jane Smith'
+  describe('get_manager operation', () => {
+    it('should get user manager', async () => {
+      const mockManager = {
+        id: 'mgr123',
+        displayName: 'Manager Name',
+        mail: 'manager@example.com',
+        jobTitle: 'Director',
+        department: 'Engineering'
       };
-      
-      callGraphAPI.mockResolvedValue(mockProfile);
-      
-      const result = await handleGetUserProfile({ userId: 'jane.smith@example.com' });
-      
+
+      callGraphAPI.mockResolvedValue(mockManager);
+
+      const result = await directoryHandler({
+        operation: 'get_manager',
+        userId: 'user123'
+      });
+
       expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'GET',
-        '/users/jane.smith@example.com',
-        null
+        mockAccessToken, 'GET', 'users/user123/manager', null, expect.any(Object)
       );
+      expect(result.content[0].text).toContain('Manager Name');
     });
   });
 
-  describe('handleSearchUsers', () => {
+  describe('get_reports operation', () => {
+    it('should list direct reports', async () => {
+      const mockReports = {
+        value: [
+          { id: 'r1', displayName: 'Report 1', mail: 'report1@example.com', jobTitle: 'Engineer', department: 'Eng' },
+          { id: 'r2', displayName: 'Report 2', mail: 'report2@example.com', jobTitle: 'Designer', department: 'Design' }
+        ]
+      };
+
+      callGraphAPI.mockResolvedValue(mockReports);
+
+      const result = await directoryHandler({
+        operation: 'get_reports',
+        userId: 'manager123'
+      });
+
+      expect(result.content[0].text).toContain('2 direct reports');
+      expect(result.content[0].text).toContain('Report 1');
+      expect(result.content[0].text).toContain('Report 2');
+    });
+
+    it('should handle no direct reports', async () => {
+      callGraphAPI.mockResolvedValue({ value: [] });
+
+      const result = await directoryHandler({
+        operation: 'get_reports',
+        userId: 'user123'
+      });
+
+      expect(result.content[0].text).toContain('No direct reports');
+    });
+  });
+
+  describe('search_users operation', () => {
     it('should search users by query', async () => {
       const mockUsers = {
         value: [
-          { displayName: 'John Doe', mail: 'john.doe@example.com' },
-          { displayName: 'John Smith', mail: 'john.smith@example.com' }
+          { id: 'u1', displayName: 'John Doe', mail: 'john@example.com', jobTitle: 'Engineer', department: 'Eng' },
+          { id: 'u2', displayName: 'John Smith', mail: 'jsmith@example.com', jobTitle: 'PM', department: 'Product' }
         ]
       };
-      
+
       callGraphAPI.mockResolvedValue(mockUsers);
-      
-      const result = await handleSearchUsers({ query: 'John' });
-      
-      expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'GET',
-        "/users?$filter=startswith(displayName,'John') or startswith(userPrincipalName,'John')",
-        null
-      );
+
+      const result = await directoryHandler({
+        operation: 'search_users',
+        query: 'John'
+      });
+
       expect(result.content[0].text).toContain('Found 2 users');
+      expect(result.content[0].text).toContain('John Doe');
+      expect(result.content[0].text).toContain('John Smith');
     });
 
-    it('should show select fields when specified', async () => {
-      const mockUsers = { value: [] };
-      
-      callGraphAPI.mockResolvedValue(mockUsers);
-      
-      const result = await handleSearchUsers({ 
-        query: 'test',
-        selectFields: ['displayName', 'mail']
-      });
-      
-      expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'GET',
-        "/users?$filter=startswith(displayName,'test') or startswith(userPrincipalName,'test')&$select=displayName,mail",
-        null
-      );
-    });
-  });
-
-  describe('handleListDirectReports', () => {
-    it('should list direct reports for a manager', async () => {
-      const mockReports = {
-        value: [
-          { displayName: 'Report 1', mail: 'report1@example.com' },
-          { displayName: 'Report 2', mail: 'report2@example.com' }
-        ]
-      };
-      
-      callGraphAPI.mockResolvedValue(mockReports);
-      
-      const result = await handleListDirectReports({ userId: 'manager123' });
-      
-      expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'GET',
-        '/users/manager123/directReports',
-        null
-      );
-      expect(result.content[0].text).toContain('Found 2 direct reports');
-    });
-  });
-
-  describe('handleGetPresence', () => {
-    it('should get user presence status', async () => {
-      const mockPresence = {
-        availability: 'Available',
-        activity: 'Available'
-      };
-      
-      callGraphAPI.mockResolvedValue(mockPresence);
-      
-      const result = await handleGetPresence({ userId: 'user123' });
-      
-      expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'GET',
-        '/users/user123/presence',
-        null
-      );
-      expect(result.content[0].text).toContain('Availability: Available');
-    });
-  });
-
-  describe('handleUpdatePresence', () => {
-    it('should update user presence status', async () => {
-      callGraphAPI.mockResolvedValue({});
-      
-      const result = await handleUpdatePresence({
-        availability: 'Busy',
-        activity: 'InACall'
-      });
-      
-      expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'PATCH',
-        '/me/presence/setUserPreferredPresence',
-        {
-          availability: 'Busy',
-          activity: 'InACall'
-        }
-      );
-      expect(result.content[0].text).toBe('Successfully updated presence status.');
-    });
-
-    it('should validate required parameters', async () => {
-      const result = await handleUpdatePresence({});
-      
-      expect(result.content[0].text).toContain('Missing required parameter: availability');
+    it('should require query parameter', async () => {
+      const result = await directoryHandler({ operation: 'search_users' });
+      expect(result.content[0].text).toContain('Missing required parameter: query');
     });
   });
 });

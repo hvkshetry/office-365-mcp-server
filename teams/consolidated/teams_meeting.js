@@ -34,6 +34,11 @@
 const { ensureAuthenticated } = require('../../auth');
 const { callGraphAPI } = require('../../utils/graph-api');
 const config = require('../../config');
+const fs = require('fs');
+const path = require('path');
+
+const TRANSCRIPT_MAX_INLINE_CHARS = 30000;
+const TRANSCRIPT_TEMP_DIR = path.join(require('os').homedir(), 'temp', 'transcripts');
 
 /**
  * Main handler for teams_meeting operations
@@ -625,7 +630,44 @@ async function getTranscript(accessToken, params) {
     } else {
       processedContent += 'Transcript content is not in expected format.';
     }
-    
+
+    // If transcript exceeds max inline size, write to temp file
+    if (processedContent.length > TRANSCRIPT_MAX_INLINE_CHARS) {
+      try {
+        if (!fs.existsSync(TRANSCRIPT_TEMP_DIR)) {
+          fs.mkdirSync(TRANSCRIPT_TEMP_DIR, { recursive: true });
+        }
+        const timestamp = Date.now();
+        const fileName = `transcript_${timestamp}.md`;
+        const filePath = path.join(TRANSCRIPT_TEMP_DIR, fileName);
+        fs.writeFileSync(filePath, processedContent, 'utf8');
+
+        // Build a truncated summary for inline response
+        const lines = processedContent.split('\n').filter(l => l.trim());
+        const speakerLines = lines.filter(l => l.includes(': '));
+        const speakers = [...new Set(speakerLines.map(l => l.split(':')[0].trim()))];
+        const summary = [
+          `Transcript retrieved (${processedContent.length.toLocaleString()} chars, ${speakerLines.length} utterances).`,
+          `Speakers: ${speakers.join(', ')}`,
+          ``,
+          `Full transcript saved to: ${filePath}`,
+          ``,
+          `--- First ~500 chars ---`,
+          processedContent.substring(0, 500) + '...'
+        ].join('\n');
+
+        return {
+          content: [{ type: "text", text: summary }]
+        };
+      } catch (writeErr) {
+        console.error('Error writing transcript to file:', writeErr);
+        // Fall through to return truncated inline content
+        return {
+          content: [{ type: "text", text: processedContent.substring(0, TRANSCRIPT_MAX_INLINE_CHARS) + '\n\n... [TRUNCATED - transcript too large for inline response]' }]
+        };
+      }
+    }
+
     return {
       content: [{ type: "text", text: processedContent }]
     };

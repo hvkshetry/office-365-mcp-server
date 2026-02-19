@@ -6,6 +6,7 @@
 const { ensureAuthenticated } = require('../auth');
 const { callGraphAPI } = require('../utils/graph-api');
 const config = require('../config');
+const { safeTool } = require('../utils/errors');
 
 /**
  * Unified files handler for all file operations
@@ -638,7 +639,7 @@ const filesTools = [
       },
       required: ["operation"]
     },
-    handler: handleFiles
+    handler: safeTool('files', handleFiles)
   },
   {
     name: "files_map_sharepoint_path",

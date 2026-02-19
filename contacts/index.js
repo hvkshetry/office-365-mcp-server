@@ -6,6 +6,7 @@
 const { ensureAuthenticated } = require('../auth');
 const { callGraphAPI } = require('../utils/graph-api');
 const config = require('../config');
+const { safeTool } = require('../utils/errors');
 
 /**
  * Main contacts handler
@@ -749,7 +750,7 @@ const contactsTools = [
       },
       required: ["operation"]
     },
-    handler: handleContacts
+    handler: safeTool('contacts', handleContacts)
   }
 ];
 

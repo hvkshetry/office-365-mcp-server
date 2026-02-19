@@ -1,26 +1,25 @@
-const { describe, it, expect, jest } = require('@jest/globals');
+const { describe, it, expect } = require('@jest/globals');
 const teamsTools = require('../teams');
-const tokenManager = require('../auth/token-manager');
+const { ensureAuthenticated } = require('../auth');
 const { callGraphAPI } = require('../utils/graph-api');
 
-jest.mock('../auth/token-manager');
+jest.mock('../auth', () => ({
+  ensureAuthenticated: jest.fn()
+}));
 jest.mock('../utils/graph-api');
 
 describe('Teams Module - Consolidated Tools', () => {
-  const mockTokens = {
-    access_token: 'mock-access-token',
-    email: 'user@example.com'
-  };
+  const mockAccessToken = 'mock-access-token';
 
   beforeEach(() => {
     jest.clearAllMocks();
-    tokenManager.loadTokenCache.mockReturnValue(mockTokens);
+    ensureAuthenticated.mockResolvedValue(mockAccessToken);
   });
 
   describe('Consolidated Tools Export', () => {
     it('should export exactly 3 consolidated tools', () => {
       expect(teamsTools).toHaveLength(3);
-      
+
       const toolNames = teamsTools.map(tool => tool.name);
       expect(toolNames).toContain('teams_meeting');
       expect(toolNames).toContain('teams_channel');
@@ -57,7 +56,7 @@ describe('Teams Module - Consolidated Tools', () => {
         id: 'meeting-id',
         joinWebUrl: 'https://teams.microsoft.com/l/meetup-join/...'
       };
-      
+
       callGraphAPI.mockResolvedValue(mockMeeting);
 
       const result = await meetingTool.handler({
@@ -93,7 +92,7 @@ describe('Teams Module - Consolidated Tools', () => {
           { id: 'channel1', displayName: 'General' }
         ]
       };
-      
+
       callGraphAPI.mockResolvedValue(mockChannels);
 
       const result = await channelTool.handler({
@@ -101,7 +100,7 @@ describe('Teams Module - Consolidated Tools', () => {
         teamId: 'team-id'
       });
 
-      expect(result.content[0].text).toContain('Found 1 channels');
+      expect(result.content[0].text).toContain('Found 1 channel');
       expect(result.content[0].text).toContain('General');
     });
   });

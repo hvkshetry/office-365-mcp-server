@@ -1,231 +1,203 @@
-const { describe, it, expect, jest } = require('@jest/globals');
-const {
-  handleListPlans,
-  handleCreatePlan,
-  handleListTasks,
-  handleCreateTask,
-  handleUpdateTask,
-  handleListBuckets,
-  handleCreateBucket
-} = require('../planner');
-const tokenManager = require('../auth/token-manager');
+const { plannerTools } = require('../planner');
+const { ensureAuthenticated } = require('../auth');
 const { callGraphAPI } = require('../utils/graph-api');
 
-jest.mock('../auth/token-manager');
+jest.mock('../auth', () => ({
+  ensureAuthenticated: jest.fn()
+}));
 jest.mock('../utils/graph-api');
 
-describe('Planner Module', () => {
-  const mockTokens = {
-    access_token: 'mock-access-token',
-    email: 'user@example.com'
-  };
+// The consolidated planner tool
+const plannerHandler = plannerTools[0].handler;
+
+describe('Planner Module (Consolidated)', () => {
+  const mockAccessToken = 'mock-access-token';
 
   beforeEach(() => {
     jest.clearAllMocks();
-    tokenManager.loadTokenCache.mockReturnValue(mockTokens);
+    ensureAuthenticated.mockResolvedValue(mockAccessToken);
   });
 
-  describe('handleListPlans', () => {
-    it('should list plans for current user', async () => {
+  describe('plan entity', () => {
+    it('should list plans', async () => {
       const mockPlans = {
         value: [
           { id: 'plan1', title: 'Project Alpha' },
           { id: 'plan2', title: 'Project Beta' }
         ]
       };
-      
+
       callGraphAPI.mockResolvedValue(mockPlans);
-      
-      const result = await handleListPlans({});
-      
+
+      const result = await plannerHandler({ entity: 'plan', operation: 'list' });
+
       expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'GET',
-        '/me/planner/plans',
-        null
+        mockAccessToken, 'GET', 'me/planner/plans', null
       );
       expect(result.content[0].text).toContain('Found 2 plans');
     });
 
-    it('should list plans for specific group', async () => {
-      const mockPlans = { value: [] };
-      
-      callGraphAPI.mockResolvedValue(mockPlans);
-      
-      const result = await handleListPlans({ groupId: 'group123' });
-      
-      expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'GET',
-        '/groups/group123/planner/plans',
-        null
-      );
-      expect(result.content[0].text).toBe('No plans found.');
-    });
-  });
+    it('should create a plan', async () => {
+      callGraphAPI.mockResolvedValue({ id: 'newplan123', title: 'New Project' });
 
-  describe('handleCreatePlan', () => {
-    it('should create a plan successfully', async () => {
-      const mockResponse = {
-        id: 'newplan123',
-        title: 'New Project'
-      };
-      
-      callGraphAPI.mockResolvedValue(mockResponse);
-      
-      const result = await handleCreatePlan({
-        title: 'New Project',
-        ownerId: 'group456'
+      const result = await plannerHandler({
+        entity: 'plan', operation: 'create', title: 'New Project', groupId: 'group456'
       });
-      
+
       expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'POST',
-        '/planner/plans',
-        {
-          title: 'New Project',
-          owner: 'group456'
-        }
+        mockAccessToken, 'POST', 'planner/plans', { owner: 'group456', title: 'New Project' }
       );
-      expect(result.content[0].text).toContain('Successfully created plan');
+      expect(result.content[0].text).toContain('Plan created successfully');
     });
 
-    it('should validate required parameters', async () => {
-      const result = await handleCreatePlan({ title: 'Test' });
-      
-      expect(result.content[0].text).toContain('Missing required parameters');
+    it('should update plan with ETag in headers', async () => {
+      callGraphAPI.mockResolvedValueOnce({ '@odata.etag': 'W/"planEtag"' });
+      callGraphAPI.mockResolvedValueOnce({});
+
+      const result = await plannerHandler({
+        entity: 'plan', operation: 'update', planId: 'plan1', title: 'Updated'
+      });
+
+      expect(callGraphAPI).toHaveBeenCalledWith(
+        mockAccessToken, 'PATCH', 'planner/plans/plan1',
+        { title: 'Updated' }, null, { 'If-Match': 'W/"planEtag"' }
+      );
+      expect(result.content[0].text).toContain('Plan updated successfully');
+    });
+
+    it('should delete plan with ETag in headers', async () => {
+      callGraphAPI.mockResolvedValueOnce({ '@odata.etag': 'W/"planEtag2"' });
+      callGraphAPI.mockResolvedValueOnce({});
+
+      const result = await plannerHandler({
+        entity: 'plan', operation: 'delete', planId: 'plan1'
+      });
+
+      expect(callGraphAPI).toHaveBeenCalledWith(
+        mockAccessToken, 'DELETE', 'planner/plans/plan1',
+        null, null, { 'If-Match': 'W/"planEtag2"' }
+      );
+      expect(result.content[0].text).toContain('Plan deleted successfully');
     });
   });
 
-  describe('handleListTasks', () => {
-    it('should list tasks for a plan', async () => {
-      const mockTasks = {
+  describe('task entity', () => {
+    it('should list tasks', async () => {
+      callGraphAPI.mockResolvedValue({
         value: [
           { id: 'task1', title: 'Design UI', percentComplete: 50 },
           { id: 'task2', title: 'Implement API', percentComplete: 0 }
         ]
-      };
-      
-      callGraphAPI.mockResolvedValue(mockTasks);
-      
-      const result = await handleListTasks({ planId: 'plan123' });
-      
+      });
+
+      const result = await plannerHandler({ entity: 'task', operation: 'list', planId: 'plan123' });
+
       expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'GET',
-        '/planner/plans/plan123/tasks',
-        null
+        mockAccessToken, 'GET', 'planner/plans/plan123/tasks', null
       );
       expect(result.content[0].text).toContain('Found 2 tasks');
-      expect(result.content[0].text).toContain('Design UI (50% complete)');
     });
-  });
 
-  describe('handleCreateTask', () => {
-    it('should create a task successfully', async () => {
-      const mockResponse = {
-        id: 'newtask123',
-        title: 'New Task'
-      };
-      
-      callGraphAPI.mockResolvedValue(mockResponse);
-      
-      const result = await handleCreateTask({
-        planId: 'plan123',
-        title: 'New Task',
-        bucketId: 'bucket123'
+    it('should create a task', async () => {
+      callGraphAPI.mockResolvedValue({ id: 'newtask123' });
+
+      const result = await plannerHandler({
+        entity: 'task', operation: 'create', planId: 'plan123', title: 'New Task', bucketId: 'b1'
       });
-      
-      expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'POST',
-        '/planner/tasks',
-        {
-          planId: 'plan123',
-          title: 'New Task',
-          bucketId: 'bucket123'
-        }
-      );
-      expect(result.content[0].text).toContain('Successfully created task');
-    });
-  });
 
-  describe('handleUpdateTask', () => {
-    it('should update task completion', async () => {
-      // Mocking the GET request for ETag
+      expect(callGraphAPI).toHaveBeenCalledWith(
+        mockAccessToken, 'POST', 'planner/tasks',
+        { planId: 'plan123', title: 'New Task', bucketId: 'b1' }
+      );
+      expect(result.content[0].text).toContain('Task created successfully');
+    });
+
+    it('should update task with ETag in headers (not query params)', async () => {
+      callGraphAPI.mockResolvedValueOnce({ '@odata.etag': 'W/"etag123"' });
+      callGraphAPI.mockResolvedValueOnce({});
+
+      const result = await plannerHandler({
+        entity: 'task', operation: 'update', taskId: 'task123', percentComplete: 100
+      });
+
+      expect(callGraphAPI).toHaveBeenCalledWith(
+        mockAccessToken, 'PATCH', 'planner/tasks/task123',
+        { percentComplete: 100 }, null, { 'If-Match': 'W/"etag123"' }
+      );
+      expect(result.content[0].text).toContain('Task updated successfully');
+    });
+
+    it('should get task details via get_details operation', async () => {
       callGraphAPI.mockResolvedValueOnce({
-        '@odata.etag': 'W/"etag123"'
+        title: 'Test Task', id: 't1', percentComplete: 50,
+        createdDateTime: '2025-01-01T00:00:00Z', bucketId: 'b1'
       });
-      
-      // Mocking the PATCH request
       callGraphAPI.mockResolvedValueOnce({
-        id: 'task123',
-        percentComplete: 100
+        description: 'A test task', checklist: {}, references: {}
       });
-      
-      const result = await handleUpdateTask({
-        taskId: 'task123',
-        percentComplete: 100
+
+      const result = await plannerHandler({
+        entity: 'task', operation: 'get_details', taskId: 't1'
       });
-      
-      expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'PATCH',
-        '/planner/tasks/task123',
-        { percentComplete: 100 },
-        { 'If-Match': 'W/"etag123"' }
-      );
-      expect(result.content[0].text).toContain('Successfully updated task');
+
+      expect(result.content[0].text).toContain('Task Details');
+      expect(result.content[0].text).toContain('Test Task');
     });
   });
 
-  describe('handleListBuckets', () => {
-    it('should list buckets for a plan', async () => {
-      const mockBuckets = {
-        value: [
-          { id: 'bucket1', name: 'To Do' },
-          { id: 'bucket2', name: 'In Progress' }
-        ]
-      };
-      
-      callGraphAPI.mockResolvedValue(mockBuckets);
-      
-      const result = await handleListBuckets({ planId: 'plan123' });
-      
-      expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'GET',
-        '/planner/plans/plan123/buckets',
-        null
-      );
+  describe('bucket entity', () => {
+    it('should list buckets', async () => {
+      callGraphAPI.mockResolvedValue({
+        value: [{ id: 'b1', name: 'To Do' }, { id: 'b2', name: 'Done' }]
+      });
+
+      const result = await plannerHandler({ entity: 'bucket', operation: 'list', planId: 'p1' });
       expect(result.content[0].text).toContain('Found 2 buckets');
     });
+
+    it('should update bucket with ETag in headers', async () => {
+      callGraphAPI.mockResolvedValueOnce({ '@odata.etag': 'W/"bEtag"' });
+      callGraphAPI.mockResolvedValueOnce({});
+
+      const result = await plannerHandler({
+        entity: 'bucket', operation: 'update', bucketId: 'b1', name: 'Updated'
+      });
+
+      expect(callGraphAPI).toHaveBeenCalledWith(
+        mockAccessToken, 'PATCH', 'planner/buckets/b1',
+        { name: 'Updated' }, null, { 'If-Match': 'W/"bEtag"' }
+      );
+    });
   });
 
-  describe('handleCreateBucket', () => {
-    it('should create a bucket successfully', async () => {
-      const mockResponse = {
-        id: 'newbucket123',
-        name: 'Done'
-      };
-      
-      callGraphAPI.mockResolvedValue(mockResponse);
-      
-      const result = await handleCreateBucket({
-        planId: 'plan123',
-        name: 'Done'
+  describe('user entity', () => {
+    it('should lookup single user', async () => {
+      callGraphAPI.mockResolvedValue({
+        displayName: 'Test User', mail: 'test@example.com', id: 'uid1'
       });
-      
-      expect(callGraphAPI).toHaveBeenCalledWith(
-        'mock-access-token',
-        'POST',
-        '/planner/buckets',
-        {
-          planId: 'plan123',
-          name: 'Done'
-        }
-      );
-      expect(result.content[0].text).toContain('Successfully created bucket');
+
+      const result = await plannerHandler({
+        entity: 'user', operation: 'lookup', email: 'test@example.com'
+      });
+
+      expect(result.content[0].text).toContain('Test User');
+    });
+  });
+
+  describe('routing', () => {
+    it('should require entity and operation', async () => {
+      const result = await plannerHandler({ entity: 'plan' });
+      expect(result.content[0].text).toContain('Missing required parameters');
+    });
+
+    it('should reject invalid entity', async () => {
+      const result = await plannerHandler({ entity: 'invalid', operation: 'list' });
+      expect(result.content[0].text).toContain('Invalid entity');
+    });
+
+    it('should reject invalid task operation', async () => {
+      const result = await plannerHandler({ entity: 'task', operation: 'invalid_op' });
+      expect(result.content[0].text).toContain('Invalid task operation');
     });
   });
 });

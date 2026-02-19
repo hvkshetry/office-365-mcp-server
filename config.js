@@ -29,18 +29,19 @@ module.exports = {
     scopes: [
       'offline_access',  // CRITICAL: Required for refresh tokens
       'User.Read', 'User.ReadWrite', 'User.ReadBasic.All',
-      'Mail.Read', 'Mail.ReadWrite', 'Mail.Send', 'MailboxSettings.ReadWrite',
-      'Calendars.Read', 'Calendars.ReadWrite',
+      'Mail.ReadWrite', 'Mail.Send', 'Mail.ReadWrite.Shared', 'Mail.Send.Shared',
+      'MailboxSettings.ReadWrite',
+      'Calendars.ReadWrite',
       'Contacts.ReadWrite',
-      'Files.Read', 'Files.ReadWrite', 'Files.ReadWrite.All',
+      'Files.ReadWrite.All',
       'Team.ReadBasic.All', 'Team.Create',
-      'Chat.Read', 'Chat.ReadWrite',
+      'Chat.ReadWrite',
       'ChannelMessage.Read.All', 'ChannelMessage.Send',
       'OnlineMeetingTranscript.Read.All',
       'OnlineMeetings.ReadWrite',
-      'Tasks.Read', 'Tasks.ReadWrite',
+      'Tasks.ReadWrite',
       'Group.Read.All', 'Directory.Read.All',
-      'Presence.Read', 'Presence.ReadWrite'
+      'Presence.ReadWrite'
     ],
     tokenStorePath: path.join(homeDir, '.office-mcp-tokens.json'),
     authServerUrl: 'http://localhost:3000'
@@ -48,6 +49,16 @@ module.exports = {
   
   // Microsoft Graph API
   GRAPH_API_ENDPOINT: 'https://graph.microsoft.com/v1.0/',
+
+  // Helper function to get mailbox prefix for Graph API calls
+  // With .Shared scopes, use users/{mailbox} for shared mailbox access
+  getMailboxPrefix(mailbox) {
+    if (mailbox && mailbox !== 'me') {
+      return `users/${mailbox}`;
+    }
+    return 'me';
+  },
+
   
   // Email constants
   EMAIL_SELECT_FIELDS: 'id,subject,from,toRecipients,ccRecipients,receivedDateTime,bodyPreview,hasAttachments,importance,isRead',
