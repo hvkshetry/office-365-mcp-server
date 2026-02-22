@@ -464,8 +464,11 @@ async function searchUsingFilter(accessToken, params) {
 
   const filterQuery = filters.length > 0 ? filters.join(' and ') : null;
 
+  // Graph API rejects $orderby combined with contains() in $filter
+  // ("The restriction or sort order is too complex for this operation")
+  const hasContainsFilter = filters.some(f => f.includes('contains('));
   const hasFolderSpecificEndpoint = endpoint && endpoint.includes('mailFolders');
-  const shouldIncludeOrderBy = !hasFolderSpecificEndpoint || filters.length === 0;
+  const shouldIncludeOrderBy = !hasContainsFilter && (!hasFolderSpecificEndpoint || filters.length === 0);
 
   const queryParams = {
     $top: Math.min(maxResults, 250),

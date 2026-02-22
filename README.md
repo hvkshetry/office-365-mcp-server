@@ -18,7 +18,7 @@ This is a comprehensive implementation of the Office MCP (Model Context Protocol
 - **Email Attachment Handling**: Download embedded attachments and map SharePoint URLs to local paths
 - **Advanced Email Search**: Unified search with KQL support and automatic query optimization
 - **Teams Meeting Management**: Access transcripts, recordings, and AI insights
-- **File Management**: Full OneDrive and SharePoint file operations
+- **File Management**: Full OneDrive and SharePoint file operations with cross-drive support
 - **Contact Management**: Full CRUD operations for Outlook contacts with advanced search
 - **Task Management**: Microsoft Planner and To Do integration
 - **Configurable Paths**: Environment variables for all local sync paths
@@ -73,12 +73,12 @@ The server uses a consolidated tool design where each Microsoft 365 domain is ex
 | `teams_meeting` | Teams meetings | `create`, `update`, `cancel`, `find`, `list_transcripts`, `get_transcript`, `get_recordings` |
 | `teams_channel` | Teams channels | `list`, `create`, `get`, `update`, `delete`, `send_message`, `list_messages`, `list_members` |
 | `teams_chat` | Teams chat | `list`, `create`, `get`, `send_message`, `list_messages`, `list_members` |
-| `files` | OneDrive/SharePoint | `list`, `get`, `search`, `upload`, `download`, `create_folder`, `delete`, `move`, `copy` |
-| `search` | Unified search | Keyword-based search across mail, files, events |
+| `files` | OneDrive/SharePoint | `list`, `get`, `search`, `upload`, `download`, `create_folder`, `delete`, `move`, `copy`, `share` — all operations support cross-drive via `driveId` |
+| `search` | Unified search | Keyword-based search across mail, files, events — returns `ID` and `DriveID` for actionable results |
 | `contacts` | Outlook contacts | `list`, `get`, `create`, `update`, `delete`, `search`, `list_folders` |
 | `planner` | Microsoft Planner | Entity+operation: `plan.list`, `task.create`, `bucket.get_tasks`, `user.lookup`, etc. |
 | `todo` | Microsoft To Do | `list_lists`, `create_list`, `list_tasks`, `create_task`, `update_task`, `list_checklist`, etc. |
-| `groups` | M365 Groups | `list`, `get`, `create`, `update`, `delete`, `list_members`, `add_member`, `remove_member` |
+| `groups` | M365 Groups | `list`, `get`, `create`, `update`, `delete`, `list_members`, `add_member`, `remove_member`, `list_owners`, `get_drive`, `list_drives` |
 | `directory` | User directory | `lookup_user`, `get_profile`, `get_manager`, `get_reports`, `get_presence`, `search_users` |
 | `notifications` | Webhooks | `create`, `list`, `renew`, `delete` |
 
@@ -135,6 +135,7 @@ To use this MCP server you need to first register and configure an app in Azure 
     - Group.Read.All
     - Directory.Read.All
     - Presence.ReadWrite
+    - Sites.Read.All
 6. Click on "Add permissions"
 
 ### Client Secret

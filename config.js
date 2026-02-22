@@ -41,7 +41,8 @@ module.exports = {
       'OnlineMeetings.ReadWrite',
       'Tasks.ReadWrite',
       'Group.Read.All', 'Directory.Read.All',
-      'Presence.ReadWrite'
+      'Presence.ReadWrite',
+      'Sites.Read.All'
     ],
     tokenStorePath: path.join(homeDir, '.office-mcp-tokens.json'),
     authServerUrl: 'http://localhost:3000'

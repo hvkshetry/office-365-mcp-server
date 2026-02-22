@@ -49,7 +49,8 @@ async function handleDirectory(args) {
 
       case 'get_profile': {
         // Get current user's profile (or specified user)
-        const endpoint = params.userId ? `users/${params.userId}` : 'me';
+        // "me" is a top-level Graph alias, not valid under /users/
+        const endpoint = (!params.userId || params.userId === 'me') ? 'me' : `users/${params.userId}`;
 
         const user = await callGraphAPI(accessToken, 'GET', endpoint, null, {
           $select: 'id,displayName,mail,userPrincipalName,jobTitle,department,officeLocation,mobilePhone,businessPhones,companyName,aboutMe,birthday,hireDate,interests,skills,schools'

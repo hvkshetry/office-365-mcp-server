@@ -9,6 +9,42 @@ const config = require('../config');
 const { safeTool } = require('../utils/errors');
 
 /**
+ * Build the correct Graph API endpoint for a drive item.
+ * - If driveId is provided, uses /drives/{driveId}/items/{fileId}  (cross-drive)
+ * - Otherwise falls back to /me/drive/items/{fileId}               (user's OneDrive)
+ */
+function driveItemEndpoint(fileId, driveId) {
+  if (driveId) {
+    return `/drives/${driveId}/items/${fileId}`;
+  }
+  return `/me/drive/items/${fileId}`;
+}
+
+/**
+ * Build the correct Graph API endpoint for a path-based drive item.
+ * - If driveId is provided, uses /drives/{driveId}/root:{path}  (cross-drive)
+ * - Otherwise falls back to /me/drive/root:{path}                (user's OneDrive)
+ */
+function drivePathEndpoint(path, driveId) {
+  if (driveId) {
+    return `/drives/${driveId}/root:${path}`;
+  }
+  return `/me/drive/root:${path}`;
+}
+
+/**
+ * Build the correct Graph API endpoint for a parent folder by ID.
+ * - If driveId is provided, uses /drives/{driveId}/items/{parentId}  (cross-drive)
+ * - Otherwise falls back to /me/drive/items/{parentId}               (user's OneDrive)
+ */
+function driveParentEndpoint(parentId, driveId) {
+  if (driveId) {
+    return `/drives/${driveId}/items/${parentId}`;
+  }
+  return `/me/drive/items/${parentId}`;
+}
+
+/**
  * Unified files handler for all file operations
  */
 async function handleFiles(args) {
@@ -68,12 +104,11 @@ async function handleFiles(args) {
  */
 async function listFiles(accessToken, params) {
   const { 
-    path = '/me/drive/root', 
-    siteId, 
+    path = '/me/drive/root',
+    siteId,
     driveId,
     folderId,
-    includeSubfolders = false,
-    maxResults = 50 
+    maxResults = 50
   } = params;
   
   let endpoint = path;
@@ -81,6 +116,11 @@ async function listFiles(accessToken, params) {
   // Handle different contexts
   if (siteId && driveId) {
     endpoint = `/sites/${siteId}/drives/${driveId}/root`;
+  } else if (siteId) {
+    // Resolve default drive for the site
+    endpoint = `/sites/${siteId}/drive/root`;
+  } else if (driveId && folderId) {
+    endpoint = `/drives/${driveId}/items/${folderId}`;
   } else if (driveId) {
     endpoint = `/drives/${driveId}/root`;
   } else if (folderId) {
@@ -127,21 +167,21 @@ async function listFiles(accessToken, params) {
  * Get file metadata
  */
 async function getFile(accessToken, params) {
-  const { fileId, path } = params;
-  
+  const { fileId, path, driveId } = params;
+
   if (!fileId && !path) {
     return {
-      content: [{ 
-        type: "text", 
-        text: "Missing required parameter: fileId or path" 
+      content: [{
+        type: "text",
+        text: "Missing required parameter: fileId or path"
       }]
     };
   }
-  
-  const endpoint = fileId 
-    ? `/me/drive/items/${fileId}`
-    : `/me/drive/root:${path}`;
-  
+
+  const endpoint = fileId
+    ? driveItemEndpoint(fileId, driveId)
+    : drivePathEndpoint(path, driveId);
+
   const response = await callGraphAPI(
     accessToken,
     'GET',
@@ -172,11 +212,12 @@ async function getFile(accessToken, params) {
  * Upload a file to OneDrive
  */
 async function uploadFile(accessToken, params) {
-  const { 
-    fileName, 
-    content, 
+  const {
+    fileName,
+    content,
     parentPath = '/me/drive/root',
     parentId,
+    driveId,
     conflictBehavior = 'rename' // rename, replace, fail
   } = params;
   
@@ -190,7 +231,7 @@ async function uploadFile(accessToken, params) {
   }
   
   const endpoint = parentId
-    ? `/me/drive/items/${parentId}:/${fileName}:/content`
+    ? `${driveParentEndpoint(parentId, driveId)}:/${fileName}:/content`
     : `${parentPath}:/${fileName}:/content`;
   
   const queryParams = {
@@ -221,40 +262,40 @@ async function uploadFile(accessToken, params) {
  * Download file content
  */
 async function downloadFile(accessToken, params) {
-  const { fileId, path } = params;
-  
+  const { fileId, path, driveId } = params;
+
   if (!fileId && !path) {
     return {
-      content: [{ 
-        type: "text", 
-        text: "Missing required parameter: fileId or path" 
+      content: [{
+        type: "text",
+        text: "Missing required parameter: fileId or path"
       }]
     };
   }
-  
-  const endpoint = fileId 
-    ? `/me/drive/items/${fileId}/content`
-    : `/me/drive/root:${path}:/content`;
-  
+
+  const endpoint = fileId
+    ? `${driveItemEndpoint(fileId, driveId)}/content`
+    : `${drivePathEndpoint(path, driveId)}:/content`;
+
   try {
     const content = await callGraphAPI(
       accessToken,
       'GET',
       endpoint
     );
-    
+
     return {
-      content: [{ 
-        type: "text", 
-        text: `File content downloaded successfully.\nContent length: ${content.length} bytes\n\nContent:\n${content}` 
+      content: [{
+        type: "text",
+        text: `File content downloaded successfully.\nContent length: ${content.length} bytes\n\nContent:\n${content}`
       }]
     };
   } catch (error) {
     // For binary files, we might get a download URL instead
-    const metadataEndpoint = fileId 
-      ? `/me/drive/items/${fileId}`
-      : `/me/drive/root:${path}`;
-    
+    const metadataEndpoint = fileId
+      ? driveItemEndpoint(fileId, driveId)
+      : drivePathEndpoint(path, driveId);
+
     const metadata = await callGraphAPI(
       accessToken,
       'GET',
@@ -280,21 +321,21 @@ async function downloadFile(accessToken, params) {
  * Delete a file or folder
  */
 async function deleteFile(accessToken, params) {
-  const { fileId, path } = params;
-  
+  const { fileId, path, driveId } = params;
+
   if (!fileId && !path) {
     return {
-      content: [{ 
-        type: "text", 
-        text: "Missing required parameter: fileId or path" 
+      content: [{
+        type: "text",
+        text: "Missing required parameter: fileId or path"
       }]
     };
   }
-  
-  const endpoint = fileId 
-    ? `/me/drive/items/${fileId}`
-    : `/me/drive/root:${path}`;
-  
+
+  const endpoint = fileId
+    ? driveItemEndpoint(fileId, driveId)
+    : drivePathEndpoint(path, driveId);
+
   await callGraphAPI(
     accessToken,
     'DELETE',
@@ -310,32 +351,35 @@ async function deleteFile(accessToken, params) {
  * Share a file
  */
 async function shareFile(accessToken, params) {
-  const { 
-    fileId, 
+  const {
+    fileId,
+    driveId,
     type = 'view', // view, edit, embed
     scope = 'anonymous', // anonymous, organization, users
     password,
     expirationDateTime,
     recipients
   } = params;
-  
+
   if (!fileId) {
     return {
-      content: [{ 
-        type: "text", 
-        text: "Missing required parameter: fileId" 
+      content: [{
+        type: "text",
+        text: "Missing required parameter: fileId"
       }]
     };
   }
-  
+
+  const itemEndpoint = driveItemEndpoint(fileId, driveId);
+
   const body = {
     type: type,
     scope: scope
   };
-  
+
   if (password) body.password = password;
   if (expirationDateTime) body.expirationDateTime = expirationDateTime;
-  
+
   if (recipients && recipients.length > 0) {
     // Send sharing invitation
     const inviteBody = {
@@ -347,18 +391,18 @@ async function shareFile(accessToken, params) {
       })),
       message: "I've shared a file with you"
     };
-    
+
     const response = await callGraphAPI(
       accessToken,
       'POST',
-      `/me/drive/items/${fileId}/invite`,
+      `${itemEndpoint}/invite`,
       inviteBody
     );
-    
+
     return {
-      content: [{ 
-        type: "text", 
-        text: `File shared successfully with ${recipients.join(', ')}` 
+      content: [{
+        type: "text",
+        text: `File shared successfully with ${recipients.join(', ')}`
       }]
     };
   } else {
@@ -366,7 +410,7 @@ async function shareFile(accessToken, params) {
     const response = await callGraphAPI(
       accessToken,
       'POST',
-      `/me/drive/items/${fileId}/createLink`,
+      `${itemEndpoint}/createLink`,
       body
     );
     
@@ -383,12 +427,15 @@ async function shareFile(accessToken, params) {
  * Search for files
  */
 async function searchFiles(accessToken, params) {
-  const { 
-    query, 
-    scope = 'me', // me, sites, all
+  const {
+    query,
+    searchScope,
+    scope,
     fileTypes,
-    maxResults = 25 
+    maxResults = 25
   } = params;
+  // searchScope takes priority over scope; default to 'all' to include SharePoint
+  const effectiveScope = searchScope || (scope === 'anonymous' || scope === 'organization' || scope === 'users' ? 'all' : scope) || 'all';
   
   if (!query) {
     return {
@@ -405,11 +452,11 @@ async function searchFiles(accessToken, params) {
     searchQuery = `${query} AND (${typeFilter})`;
   }
   
-  const endpoint = scope === 'me' 
+  const endpoint = effectiveScope === 'me'
     ? `/me/drive/search(q='${encodeURIComponent(searchQuery)}')`
     : `/search/query`;
-  
-  const body = scope !== 'me' ? {
+
+  const body = effectiveScope !== 'me' ? {
     requests: [{
       entityTypes: ['driveItem'],
       query: {
@@ -418,16 +465,16 @@ async function searchFiles(accessToken, params) {
       size: maxResults
     }]
   } : null;
-  
+
   const response = await callGraphAPI(
     accessToken,
-    scope === 'me' ? 'GET' : 'POST',
+    effectiveScope === 'me' ? 'GET' : 'POST',
     endpoint,
     body,
-    scope === 'me' ? { $top: maxResults } : {}
+    effectiveScope === 'me' ? { $top: maxResults } : {}
   );
-  
-  const items = scope === 'me' ? response.value : response.value[0].hitsContainers[0].hits;
+
+  const items = effectiveScope === 'me' ? response.value : response.value[0].hitsContainers[0].hits;
   
   if (!items || items.length === 0) {
     return {
@@ -436,12 +483,15 @@ async function searchFiles(accessToken, params) {
   }
   
   const results = items.map((item, index) => {
-    const file = scope === 'me' ? item : item.resource;
+    const file = effectiveScope === 'me' ? item : item.resource;
+    const driveInfo = file.parentReference?.driveId
+      ? `\n   DriveID: ${file.parentReference.driveId}`
+      : '';
     return `${index + 1}. ${file.name}
    Path: ${file.parentReference?.path || 'N/A'}
    WebURL: ${file.webUrl || 'N/A'}
    Modified: ${new Date(file.lastModifiedDateTime).toLocaleString()}
-   ID: ${file.id}`;
+   ID: ${file.id}${driveInfo}`;
   }).join('\n\n');
   
   return {
@@ -456,31 +506,31 @@ async function searchFiles(accessToken, params) {
  * Move a file or folder
  */
 async function moveFile(accessToken, params) {
-  const { fileId, destinationId, newName } = params;
-  
+  const { fileId, destinationId, newName, driveId } = params;
+
   if (!fileId || !destinationId) {
     return {
-      content: [{ 
-        type: "text", 
-        text: "Missing required parameters: fileId and destinationId" 
+      content: [{
+        type: "text",
+        text: "Missing required parameters: fileId and destinationId"
       }]
     };
   }
-  
+
   const body = {
     parentReference: {
       id: destinationId
     }
   };
-  
+
   if (newName) {
     body.name = newName;
   }
-  
+
   const response = await callGraphAPI(
     accessToken,
     'PATCH',
-    `/me/drive/items/${fileId}`,
+    driveItemEndpoint(fileId, driveId),
     body
   );
   
@@ -496,32 +546,32 @@ async function moveFile(accessToken, params) {
  * Copy a file or folder
  */
 async function copyFile(accessToken, params) {
-  const { fileId, destinationId, newName } = params;
-  
+  const { fileId, destinationId, newName, driveId } = params;
+
   if (!fileId || !destinationId) {
     return {
-      content: [{ 
-        type: "text", 
-        text: "Missing required parameters: fileId and destinationId" 
+      content: [{
+        type: "text",
+        text: "Missing required parameters: fileId and destinationId"
       }]
     };
   }
-  
+
   const body = {
     parentReference: {
       id: destinationId
     }
   };
-  
+
   if (newName) {
     body.name = newName;
   }
-  
+
   // Copy operation returns a monitor URL
   const response = await callGraphAPI(
     accessToken,
     'POST',
-    `/me/drive/items/${fileId}/copy`,
+    `${driveItemEndpoint(fileId, driveId)}/copy`,
     body
   );
   
@@ -537,7 +587,7 @@ async function copyFile(accessToken, params) {
  * Create a folder
  */
 async function createFolder(accessToken, params) {
-  const { name, parentId, parentPath = '/me/drive/root' } = params;
+  const { name, parentId, parentPath = '/me/drive/root', driveId } = params;
   
   if (!name) {
     return {
@@ -549,7 +599,7 @@ async function createFolder(accessToken, params) {
   }
   
   const endpoint = parentId
-    ? `/me/drive/items/${parentId}/children`
+    ? `${driveParentEndpoint(parentId, driveId)}/children`
     : `${parentPath}/children`;
   
   const body = {
@@ -591,9 +641,8 @@ const filesTools = [
         path: { type: "string", description: "File path (alternative to fileId)" },
         // List parameters
         siteId: { type: "string", description: "SharePoint site ID" },
-        driveId: { type: "string", description: "Drive ID" },
+        driveId: { type: "string", description: "Drive ID (required for SharePoint files; returned by search as DriveID)" },
         folderId: { type: "string", description: "Folder ID to list contents" },
-        includeSubfolders: { type: "boolean", description: "Include subfolders in listing" },
         // Upload parameters
         fileName: { type: "string", description: "Name for uploaded file" },
         content: { type: "string", description: "File content to upload" },
@@ -624,6 +673,11 @@ const filesTools = [
         },
         // Search parameters
         query: { type: "string", description: "Search query" },
+        searchScope: {
+          type: "string",
+          enum: ["me", "sites", "all"],
+          description: "Search scope: 'me' (OneDrive only), 'sites' (SharePoint only), 'all' (both). Default: 'all'"
+        },
         fileTypes: { 
           type: "array", 
           items: { type: "string" },

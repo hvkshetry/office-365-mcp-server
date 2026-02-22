@@ -121,7 +121,7 @@ async function downloadEmbeddedAttachment(attachment, emailId, accessToken) {
  */
 function cleanupOldAttachments() {
   const tempDir = config.TEMP_ATTACHMENTS_PATH;
-  const maxAge = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+  const maxAge = 1 * 60 * 60 * 1000; // 1 hour in milliseconds
 
   if (!fs.existsSync(tempDir)) return;
 

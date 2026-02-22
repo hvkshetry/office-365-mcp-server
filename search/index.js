@@ -358,10 +358,13 @@ async function enrichSearchResults(accessToken, searchResponse, includeExcelData
     // Excel workbook enrichment
     if (includeExcelData && resource.name?.match(/\.xlsx?$/i) && resource.id) {
       try {
+        const drivePrefix = resource.parentReference?.driveId
+          ? `/drives/${resource.parentReference.driveId}`
+          : '/me/drive';
         const tables = await callGraphAPI(
           accessToken,
           'GET',
-          `/me/drive/items/${resource.id}/workbook/tables`,
+          `${drivePrefix}/items/${resource.id}/workbook/tables`,
           null,
           { $top: 5 }
         );
@@ -585,6 +588,14 @@ function formatRichResult(result, index) {
     output += `   Date: ${new Date(resource.receivedDateTime).toLocaleString()}\n`;
   }
   
+  // File/item IDs for actionable results (driveItem and listItem)
+  if (resource.id) {
+    output += `   ID: ${resource.id}\n`;
+  }
+  if (resource.parentReference?.driveId) {
+    output += `   DriveID: ${resource.parentReference.driveId}\n`;
+  }
+
   // Modified date for files
   if (resource.lastModifiedDateTime) {
     output += `   Modified: ${new Date(resource.lastModifiedDateTime).toLocaleString()}\n`;
@@ -823,7 +834,7 @@ const searchTools = [
             type: "string",
             enum: ["driveItem", "listItem", "message", "event", "person", "chatMessage"]
           },
-          description: "Types to search (default: driveItem, message, event, listItem)"
+          description: "Types to search (default: driveItem, listItem). Note: message/event cannot be combined with driveItem/listItem"
         },
         
         // Optional filters

@@ -14,7 +14,7 @@ async function handleGroups(args) {
     return {
       content: [{
         type: "text",
-        text: "Missing required parameter: operation. Valid operations: list, get, create, update, delete, list_members, add_member, remove_member, list_owners"
+        text: "Missing required parameter: operation. Valid operations: list, get, create, update, delete, list_members, add_member, remove_member, list_owners, get_drive, list_drives"
       }]
     };
   }
@@ -181,6 +181,73 @@ async function handleGroups(args) {
         return { content: [{ type: "text", text: "Member removed successfully!" }] };
       }
 
+      case 'get_drive': {
+        if (!params.groupId) {
+          return { content: [{ type: "text", text: "Missing required parameter: groupId" }] };
+        }
+
+        try {
+          const drive = await callGraphAPI(accessToken, 'GET',
+            `groups/${params.groupId}/drive`, null, {
+              $select: 'id,name,driveType,webUrl,owner,quota'
+            });
+
+          // Also fetch the site ID for easier chaining
+          let siteInfo = '';
+          try {
+            const site = await callGraphAPI(accessToken, 'GET',
+              `groups/${params.groupId}/sites/root`, null, {
+                $select: 'id,displayName,webUrl'
+              });
+            siteInfo = `\nSite ID: ${site.id}\nSite Name: ${site.displayName}\nSite URL: ${site.webUrl}`;
+          } catch (e) {
+            // Site lookup may fail for some group types — non-fatal
+          }
+
+          const info = [
+            `Drive: ${drive.name}`,
+            `Drive ID: ${drive.id}`,
+            `Type: ${drive.driveType}`,
+            `Web URL: ${drive.webUrl}`
+          ].join('\n');
+
+          return { content: [{ type: "text", text: `${info}${siteInfo}` }] };
+        } catch (error) {
+          if (error.message?.includes('404') || error.statusCode === 404) {
+            return { content: [{ type: "text", text: "This group does not have a SharePoint drive." }] };
+          }
+          throw error;
+        }
+      }
+
+      case 'list_drives': {
+        if (!params.groupId) {
+          return { content: [{ type: "text", text: "Missing required parameter: groupId" }] };
+        }
+
+        try {
+          const response = await callGraphAPI(accessToken, 'GET',
+            `groups/${params.groupId}/drives`, null, {
+              $select: 'id,name,driveType,webUrl'
+            });
+
+          if (!response.value || response.value.length === 0) {
+            return { content: [{ type: "text", text: "No drives found for this group." }] };
+          }
+
+          const driveList = response.value.map(d =>
+            `- ${d.name}\n  Drive ID: ${d.id}\n  Type: ${d.driveType}\n  URL: ${d.webUrl}`
+          ).join('\n');
+
+          return { content: [{ type: "text", text: `${response.value.length} drives:\n\n${driveList}` }] };
+        } catch (error) {
+          if (error.message?.includes('404') || error.statusCode === 404) {
+            return { content: [{ type: "text", text: "This group does not have any SharePoint drives." }] };
+          }
+          throw error;
+        }
+      }
+
       case 'list_owners': {
         if (!params.groupId) {
           return { content: [{ type: "text", text: "Missing required parameter: groupId" }] };
@@ -207,7 +274,7 @@ async function handleGroups(args) {
         return {
           content: [{
             type: "text",
-            text: `Invalid operation: ${operation}. Valid: list, get, create, update, delete, list_members, add_member, remove_member, list_owners`
+            text: `Invalid operation: ${operation}. Valid: list, get, create, update, delete, list_members, add_member, remove_member, list_owners, get_drive, list_drives`
           }]
         };
     }
@@ -220,13 +287,13 @@ async function handleGroups(args) {
 const groupsTools = [
   {
     name: 'groups',
-    description: 'Microsoft 365 Groups: list, create, manage members and owners',
+    description: 'Microsoft 365 Groups: list, create, manage members and owners, resolve SharePoint drives',
     inputSchema: {
       type: 'object',
       properties: {
         operation: {
           type: 'string',
-          enum: ['list', 'get', 'create', 'update', 'delete', 'list_members', 'add_member', 'remove_member', 'list_owners'],
+          enum: ['list', 'get', 'create', 'update', 'delete', 'list_members', 'add_member', 'remove_member', 'list_owners', 'get_drive', 'list_drives'],
           description: 'Operation to perform'
         },
         groupId: { type: 'string', description: 'Group ID' },

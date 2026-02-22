@@ -3,6 +3,8 @@
  * Delegates to submodules: search, folders, rules, categories, attachments, focused
  */
 
+const fs = require('fs');
+const path = require('path');
 const { ensureAuthenticated } = require('../auth');
 const { callGraphAPI } = require('../utils/graph-api');
 const { safeTool } = require('../utils/errors');
@@ -37,7 +39,7 @@ async function handleEmail(args) {
     return {
       content: [{
         type: "text",
-        text: "Missing required parameter: operation. Valid operations are: list, read, send, reply, draft, update_draft, send_draft, list_drafts"
+        text: "Missing required parameter: operation. Valid operations are: list, read, get_attachment, cleanup_attachment, send, reply, draft, update_draft, send_draft, list_drafts"
       }]
     };
   }
@@ -52,6 +54,10 @@ async function handleEmail(args) {
         return await listEmails(accessToken, params);
       case 'read':
         return await readEmail(accessToken, params);
+      case 'get_attachment':
+        return await getAttachment(accessToken, params);
+      case 'cleanup_attachment':
+        return cleanupAttachment(params);
       case 'send':
         console.error('[EMAIL] Sending email');
         return await sendEmail(accessToken, params);
@@ -146,6 +152,7 @@ async function readEmail(accessToken, params) {
     };
   }
 
+  // Fetch metadata only — attachments listed without downloading content
   const response = await callGraphAPI(
     accessToken,
     'GET',
@@ -153,7 +160,7 @@ async function readEmail(accessToken, params) {
     null,
     {
       $select: 'subject,from,toRecipients,ccRecipients,receivedDateTime,body,hasAttachments',
-      $expand: 'attachments'
+      $expand: 'attachments($select=id,name,contentType,size)'
     }
   );
 
@@ -167,59 +174,170 @@ async function readEmail(accessToken, params) {
   emailContent += `Has Attachments: ${response.hasAttachments ? 'Yes' : 'No'}\n\n`;
   emailContent += `Body:\n${response.body.content}`;
 
-  // Process attachments if present
+  // List attachment metadata (no download — use get_attachment to download specific files)
   if (response.attachments && response.attachments.length > 0) {
     emailContent += '\n\nAttachments:\n';
 
     for (let i = 0; i < response.attachments.length; i++) {
       const attachment = response.attachments[i];
-      emailContent += `${i + 1}. ${attachment.name}`;
+      const sizeKB = attachment.size ? (attachment.size / 1024).toFixed(1) : 'Unknown';
+      const odataType = attachment['@odata.type'] || '';
 
-      // Handle reference attachments (SharePoint/OneDrive files)
-      if (attachment['@odata.type'] === '#microsoft.graph.referenceAttachment' && attachment.sourceUrl) {
-        try {
-          const localPath = convertSharePointUrlToLocal(attachment.sourceUrl);
-          if (localPath) {
-            emailContent += ` (SharePoint)\n   Local Path: ${localPath}\n   URL: ${attachment.sourceUrl}\n`;
-          } else {
-            emailContent += ` (SharePoint - unable to map to local path)\n   URL: ${attachment.sourceUrl}\n`;
-          }
-        } catch (err) {
-          console.error('Error mapping SharePoint attachment:', err);
-          emailContent += ` (SharePoint)\n   URL: ${attachment.sourceUrl}\n`;
-        }
-      }
-      // Handle file attachments (embedded)
-      else if (attachment['@odata.type'] === '#microsoft.graph.fileAttachment') {
-        const sizeKB = attachment.size ? (attachment.size / 1024).toFixed(1) : 'Unknown';
-
-        const localPath = await downloadEmbeddedAttachment(attachment, emailId, accessToken);
-
-        if (localPath) {
-          emailContent += ` (Embedded file - ${sizeKB} KB)\n`;
-          emailContent += `   Type: ${attachment.contentType || 'Unknown'}\n`;
-          emailContent += `   Local Path: ${localPath}\n`;
-        } else {
-          emailContent += ` (Embedded file - ${sizeKB} KB - download failed)\n`;
-          emailContent += `   Type: ${attachment.contentType || 'Unknown'}\n`;
-        }
-      }
-      // Handle item attachments (Outlook items)
-      else if (attachment['@odata.type'] === '#microsoft.graph.itemAttachment') {
-        emailContent += ` (Outlook item)\n`;
-        if (attachment.item) {
-          emailContent += `   Item Type: ${attachment.item['@odata.type']}\n`;
-        }
-      }
-      else {
-        emailContent += ` (${attachment.contentType || 'Unknown type'})\n`;
+      if (odataType === '#microsoft.graph.referenceAttachment') {
+        emailContent += `${i + 1}. ${attachment.name} (SharePoint/OneDrive link - ${sizeKB} KB)\n`;
+        emailContent += `   Type: ${attachment.contentType || 'Unknown'}\n`;
+        emailContent += `   Attachment ID: ${attachment.id}\n`;
+      } else if (odataType === '#microsoft.graph.itemAttachment') {
+        emailContent += `${i + 1}. ${attachment.name} (Outlook item)\n`;
+        emailContent += `   Attachment ID: ${attachment.id}\n`;
+      } else {
+        // fileAttachment or unknown
+        emailContent += `${i + 1}. ${attachment.name} (${sizeKB} KB)\n`;
+        emailContent += `   Type: ${attachment.contentType || 'Unknown'}\n`;
+        emailContent += `   Attachment ID: ${attachment.id}\n`;
       }
     }
+
+    emailContent += '\nUse mail { operation: "get_attachment", emailId: "...", attachmentId: "..." } to download a specific attachment.';
   }
 
   return {
     content: [{ type: "text", text: emailContent }]
   };
+}
+
+async function getAttachment(accessToken, params) {
+  const { emailId, attachmentId, mailbox } = params;
+
+  // Clean up old attachments periodically
+  try {
+    cleanupOldAttachments();
+  } catch (err) {
+    console.error('Error during attachment cleanup:', err);
+  }
+
+  if (!emailId || !attachmentId) {
+    return {
+      content: [{
+        type: "text",
+        text: "Missing required parameters: emailId and attachmentId. Read the email first to get attachment IDs."
+      }]
+    };
+  }
+
+  try {
+    // Fetch single attachment with full content
+    const attachment = await callGraphAPI(
+      accessToken,
+      'GET',
+      `${config.getMailboxPrefix(mailbox)}/messages/${emailId}/attachments/${attachmentId}`,
+      null,
+      {}
+    );
+
+    const odataType = attachment['@odata.type'] || '';
+
+    // Reference attachments (SharePoint/OneDrive links) — return URL for in-memory processing
+    if (odataType === '#microsoft.graph.referenceAttachment') {
+      const sourceUrl = attachment.sourceUrl || '';
+      let result = `Attachment: ${attachment.name} (SharePoint/OneDrive link)\n`;
+      result += `URL: ${sourceUrl}\n`;
+
+      const localPath = convertSharePointUrlToLocal(sourceUrl);
+      if (localPath) {
+        result += `Local Path: ${localPath}\n`;
+      }
+
+      result += '\nThis is a cloud file link. Use files { operation: "search" } to find and download it via Graph API for in-memory processing.';
+      return { content: [{ type: "text", text: result }] };
+    }
+
+    // File attachments (embedded) — download to temp
+    if (odataType === '#microsoft.graph.fileAttachment') {
+      const localPath = await downloadEmbeddedAttachment(attachment, emailId, accessToken);
+      const sizeKB = attachment.size ? (attachment.size / 1024).toFixed(1) : 'Unknown';
+
+      if (localPath) {
+        return {
+          content: [{
+            type: "text",
+            text: `Downloaded: ${attachment.name}\nType: ${attachment.contentType || 'Unknown'}\nSize: ${sizeKB} KB\nLocal Path: ${localPath}\n\nUse document tools (pandas, pandoc, pdftotext) to read this file.\nAfter processing, clean up with: mail { operation: "cleanup_attachment", path: "${localPath}" }`
+          }]
+        };
+      }
+
+      return {
+        content: [{
+          type: "text",
+          text: `Failed to download attachment: ${attachment.name}`
+        }]
+      };
+    }
+
+    // Item attachments (Outlook items)
+    if (odataType === '#microsoft.graph.itemAttachment') {
+      let result = `Attachment: ${attachment.name} (Outlook item)\n`;
+      if (attachment.item) {
+        result += `Item Type: ${attachment.item['@odata.type']}\n`;
+        if (attachment.item.subject) result += `Subject: ${attachment.item.subject}\n`;
+        if (attachment.item.body) result += `\nContent:\n${attachment.item.body.content || '(empty)'}`;
+      }
+      return { content: [{ type: "text", text: result }] };
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: `Unsupported attachment type: ${odataType}\nName: ${attachment.name}`
+      }]
+    };
+  } catch (error) {
+    console.error(`Error getting attachment:`, error);
+    return {
+      content: [{ type: "text", text: `Error getting attachment: ${error.message}` }]
+    };
+  }
+}
+
+function cleanupAttachment(params) {
+  const { path: filePath } = params;
+
+  if (!filePath) {
+    return {
+      content: [{ type: "text", text: "Missing required parameter: path" }]
+    };
+  }
+
+  // Safety: only allow deleting files inside the temp attachments directory
+  const tempDir = config.TEMP_ATTACHMENTS_PATH;
+  const resolvedPath = path.resolve(filePath);
+  const resolvedTempDir = path.resolve(tempDir);
+
+  if (!resolvedPath.startsWith(resolvedTempDir + path.sep) && resolvedPath !== resolvedTempDir) {
+    return {
+      content: [{
+        type: "text",
+        text: `Security: can only clean up files in ${tempDir}. Provided path is outside the temp directory.`
+      }]
+    };
+  }
+
+  try {
+    if (fs.existsSync(resolvedPath)) {
+      fs.unlinkSync(resolvedPath);
+      return {
+        content: [{ type: "text", text: `Cleaned up: ${path.basename(resolvedPath)}` }]
+      };
+    }
+    return {
+      content: [{ type: "text", text: `File already removed: ${path.basename(resolvedPath)}` }]
+    };
+  } catch (err) {
+    console.error('Error cleaning up attachment:', err);
+    return {
+      content: [{ type: "text", text: `Error cleaning up: ${err.message}` }]
+    };
+  }
 }
 
 async function sendEmail(accessToken, params) {
@@ -677,7 +795,7 @@ async function handleMail(args) {
     return {
       content: [{
         type: "text",
-        text: "Missing required parameter: operation. Valid operations: list, read, send, reply, draft, update_draft, send_draft, list_drafts, search, move, list_folders, create_folder, list_rules, create_rule, focused, list_categories, create_category, apply_category, remove_category"
+        text: "Missing required parameter: operation. Valid operations: list, read, get_attachment, cleanup_attachment, send, reply, draft, update_draft, send_draft, list_drafts, search, move, list_folders, create_folder, list_rules, create_rule, focused, list_categories, create_category, apply_category, remove_category"
       }]
     };
   }
@@ -687,6 +805,8 @@ async function handleMail(args) {
       // Core email operations
       case 'list':
       case 'read':
+      case 'get_attachment':
+      case 'cleanup_attachment':
       case 'send':
       case 'reply':
       case 'draft':
@@ -735,7 +855,7 @@ async function handleMail(args) {
         return {
           content: [{
             type: "text",
-            text: `Invalid operation: ${operation}. Valid operations: list, read, send, reply, draft, update_draft, send_draft, list_drafts, search, move, list_folders, create_folder, list_rules, create_rule, focused, list_categories, create_category, apply_category, remove_category`
+            text: `Invalid operation: ${operation}. Valid operations: list, read, get_attachment, cleanup_attachment, send, reply, draft, update_draft, send_draft, list_drafts, search, move, list_folders, create_folder, list_rules, create_rule, focused, list_categories, create_category, apply_category, remove_category`
           }]
         };
     }
@@ -758,7 +878,8 @@ const emailTools = [
         operation: {
           type: "string",
           enum: [
-            "list", "read", "send", "reply", "draft", "update_draft", "send_draft", "list_drafts",
+            "list", "read", "get_attachment", "cleanup_attachment",
+            "send", "reply", "draft", "update_draft", "send_draft", "list_drafts",
             "search", "move",
             "list_folders", "create_folder",
             "list_rules", "create_rule",
@@ -768,7 +889,9 @@ const emailTools = [
           description: "The operation to perform"
         },
         // Core email parameters
-        emailId: { type: "string", description: "Email ID (for read, reply, move, apply_category)" },
+        emailId: { type: "string", description: "Email ID (for read, get_attachment, reply, move, apply_category)" },
+        attachmentId: { type: "string", description: "Attachment ID (for get_attachment — get IDs from read)" },
+        path: { type: "string", description: "Local file path (for cleanup_attachment)" },
         to: {
           type: "array",
           items: { type: "string" },
