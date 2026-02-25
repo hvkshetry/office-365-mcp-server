@@ -5,6 +5,7 @@
  */
 const { ensureAuthenticated } = require('../auth');
 const { callGraphAPI } = require('../utils/graph-api');
+const config = require('../config');
 const { safeTool } = require('../utils/errors');
 
 async function handleTodo(args) {
@@ -142,14 +143,14 @@ async function handleTodo(args) {
         if (params.dueDate) {
           taskData.dueDateTime = {
             dateTime: params.dueDate.includes('T') ? params.dueDate : `${params.dueDate}T00:00:00`,
-            timeZone: 'UTC'
+            timeZone: config.getMsTimezone()
           };
         }
         if (params.reminderDateTime) {
           taskData.isReminderOn = true;
           taskData.reminderDateTime = {
             dateTime: params.reminderDateTime,
-            timeZone: 'UTC'
+            timeZone: config.getMsTimezone()
           };
         }
 
@@ -194,7 +195,7 @@ async function handleTodo(args) {
         if (params.dueDate) {
           updateData.dueDateTime = {
             dateTime: params.dueDate.includes('T') ? params.dueDate : `${params.dueDate}T00:00:00`,
-            timeZone: 'UTC'
+            timeZone: config.getMsTimezone()
           };
         }
 

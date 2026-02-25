@@ -84,5 +84,61 @@ module.exports = {
   SHAREPOINT_SYNC_PATH: process.env.SHAREPOINT_SYNC_PATH || path.join(homeDir, 'SharePoint'),
   ONEDRIVE_SYNC_PATH: process.env.ONEDRIVE_SYNC_PATH || path.join(homeDir, 'OneDrive'),
   TEMP_ATTACHMENTS_PATH: process.env.TEMP_ATTACHMENTS_PATH || path.join(homeDir, 'temp', 'email-attachments'),
-  SHAREPOINT_SYMLINK_PATH: process.env.SHAREPOINT_SYMLINK_PATH || path.join(homeDir, 'temp', 'sharepoint')
+  SHAREPOINT_SYMLINK_PATH: process.env.SHAREPOINT_SYMLINK_PATH || path.join(homeDir, 'temp', 'sharepoint'),
+
+  // Timezone configuration — all calendar/todo operations use Eastern Time
+  DEFAULT_TIMEZONE: process.env.DEFAULT_TIMEZONE || 'America/New_York',
+
+  // IANA → Microsoft timezone name mapping
+  IANA_TO_MS_TIMEZONE: {
+    'America/New_York': 'Eastern Standard Time',
+    'America/Chicago': 'Central Standard Time',
+    'America/Denver': 'Mountain Standard Time',
+    'America/Los_Angeles': 'Pacific Standard Time',
+    'America/Phoenix': 'US Mountain Standard Time',
+    'UTC': 'UTC',
+  },
+
+  /**
+   * Get the Microsoft timezone name for the configured IANA timezone.
+   * @returns {string} Microsoft timezone name (e.g. "Eastern Standard Time")
+   */
+  getMsTimezone() {
+    return this.IANA_TO_MS_TIMEZONE[this.DEFAULT_TIMEZONE] || 'Eastern Standard Time';
+  },
+
+  /**
+   * Format a datetime string for display using wall-clock time.
+   * Pure regex parsing — no `new Date()` to avoid UTC conversion surprises.
+   * @param {string} dateTimeStr - ISO-ish datetime string from Graph API
+   * @param {string} [timeZoneName] - Microsoft timezone name (e.g. "Eastern Standard Time")
+   * @returns {string} Formatted datetime string (e.g. "Feb 24, 2026 3:00 PM ET")
+   */
+  formatDateTime(dateTimeStr, timeZoneName) {
+    if (!dateTimeStr) return 'N/A';
+
+    // Derive short TZ abbreviation from MS timezone name
+    const tzAbbrevMap = {
+      'Eastern Standard Time': 'ET',
+      'Central Standard Time': 'CT',
+      'Mountain Standard Time': 'MT',
+      'Pacific Standard Time': 'PT',
+      'US Mountain Standard Time': 'MT',
+      'UTC': 'UTC',
+    };
+    const tzAbbrev = tzAbbrevMap[timeZoneName] || tzAbbrevMap[this.getMsTimezone()] || 'ET';
+
+    // Parse wall-clock components via regex (handles "2026-02-24T15:00:00.0000000", etc.)
+    const match = dateTimeStr.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+    if (!match) return dateTimeStr; // Unparseable — return as-is
+
+    const [, year, month, day, hour, minute] = match;
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const monthName = months[parseInt(month, 10) - 1] || month;
+    const h = parseInt(hour, 10);
+    const ampm = h >= 12 ? 'PM' : 'AM';
+    const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+
+    return `${monthName} ${parseInt(day, 10)}, ${year} ${h12}:${minute} ${ampm} ${tzAbbrev}`;
+  }
 };

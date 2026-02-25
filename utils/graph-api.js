@@ -144,6 +144,15 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
                            requestContentType.includes('video/') ||
                            Buffer.isBuffer(data);
 
+    // Inject Prefer: outlook.timezone header on calendar GET requests
+    // so Graph returns event times in the configured timezone
+    if (method === 'GET' && !customHeaders['Prefer']) {
+      const pathLower = path.toLowerCase();
+      if (pathLower.includes('/calendar') || pathLower.includes('/events') || pathLower.includes('/calendarview')) {
+        customHeaders = { ...customHeaders, 'Prefer': `outlook.timezone="${config.getMsTimezone()}"` };
+      }
+    }
+
     return new Promise((resolve, reject) => {
       const options = {
         method: method,

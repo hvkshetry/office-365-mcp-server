@@ -9,6 +9,17 @@ const config = require('../config');
 const { safeTool } = require('../utils/errors');
 
 /**
+ * Check if a datetime string already has a timezone indicator (Z, +offset, or -offset).
+ * Prevents double-appending Z to strings that already carry tz info.
+ */
+function hasTzIndicator(dt) {
+  if (!dt) return false;
+  if (dt.endsWith('Z')) return true;
+  // Check for +HH:MM or -HH:MM offset at end (e.g. "...T15:00:00-05:00")
+  return /[+-]\d{2}:\d{2}$/.test(dt);
+}
+
+/**
  * Unified calendar handler for all calendar operations
  */
 async function handleCalendar(args) {
@@ -70,21 +81,19 @@ async function listCalendarEvents(accessToken, params) {
   if (startDateTime || endDateTime) {
     const filters = [];
     if (startDateTime) {
-      // Format the date properly for Microsoft Graph API
-      // The API expects dates in ISO 8601 format
-      const formattedStartDateTime = startDateTime.includes('Z') 
-        ? startDateTime 
+      // Only append Z if no timezone indicator already present
+      const formattedStartDateTime = hasTzIndicator(startDateTime)
+        ? startDateTime
         : `${startDateTime}Z`;
-      
+
       filters.push(`start/dateTime ge '${formattedStartDateTime}'`);
       console.error(`Using start filter: start/dateTime ge '${formattedStartDateTime}'`);
     }
     if (endDateTime) {
-      // Format the date properly for Microsoft Graph API
-      const formattedEndDateTime = endDateTime.includes('Z') 
-        ? endDateTime 
+      const formattedEndDateTime = hasTzIndicator(endDateTime)
+        ? endDateTime
         : `${endDateTime}Z`;
-      
+
       filters.push(`end/dateTime le '${formattedEndDateTime}'`);
       console.error(`Using end filter: end/dateTime le '${formattedEndDateTime}'`);
     }
@@ -96,8 +105,8 @@ async function listCalendarEvents(accessToken, params) {
     // Try calendar view approach as a more reliable way to get events in a specific date range
     try {
       console.error('Attempting to use calendarView endpoint for more reliable results');
-      const formattedStartDateTime = startDateTime.includes('Z') ? startDateTime : `${startDateTime}Z`;
-      const formattedEndDateTime = endDateTime.includes('Z') ? endDateTime : `${endDateTime}Z`;
+      const formattedStartDateTime = hasTzIndicator(startDateTime) ? startDateTime : `${startDateTime}Z`;
+      const formattedEndDateTime = hasTzIndicator(endDateTime) ? endDateTime : `${endDateTime}Z`;
       
       const viewParams = {
         $select: config.CALENDAR_SELECT_FIELDS,
@@ -149,9 +158,9 @@ function formatCalendarResponse(response) {
   }
   
   const eventsList = response.value.map((event, index) => {
-    const startTime = new Date(event.start.dateTime);
-    const endTime = new Date(event.end.dateTime);
-    return `${index + 1}. ${event.subject}\n   Start: ${startTime.toLocaleString()}\n   End: ${endTime.toLocaleString()}\n   Location: ${event.location.displayName || 'N/A'}\n   ID: ${event.id}\n`;
+    const startTime = config.formatDateTime(event.start.dateTime, event.start.timeZone);
+    const endTime = config.formatDateTime(event.end.dateTime, event.end.timeZone);
+    return `${index + 1}. ${event.subject}\n   Start: ${startTime}\n   End: ${endTime}\n   Location: ${event.location.displayName || 'N/A'}\n   ID: ${event.id}\n`;
   }).join('\n');
   
   return {
@@ -182,11 +191,11 @@ async function createCalendarEvent(accessToken, params) {
     },
     start: {
       dateTime: start,
-      timeZone: "UTC"
+      timeZone: config.getMsTimezone()
     },
     end: {
       dateTime: end,
-      timeZone: "UTC"
+      timeZone: config.getMsTimezone()
     }
   };
   
@@ -223,7 +232,7 @@ async function createCalendarEvent(accessToken, params) {
         startDate: recurrence.range.startDate,
         endDate: recurrence.range.endDate,
         numberOfOccurrences: recurrence.range.numberOfOccurrences,
-        recurrenceTimeZone: recurrence.range.recurrenceTimeZone || 'UTC'
+        recurrenceTimeZone: recurrence.range.recurrenceTimeZone || config.getMsTimezone()
       }
     };
   }
@@ -265,12 +274,12 @@ async function getCalendarEvent(accessToken, params) {
     }
   );
   
-  const startTime = new Date(response.start.dateTime);
-  const endTime = new Date(response.end.dateTime);
-  
+  const startTime = config.formatDateTime(response.start.dateTime, response.start.timeZone);
+  const endTime = config.formatDateTime(response.end.dateTime, response.end.timeZone);
+
   let eventDetails = `Subject: ${response.subject}\n`;
-  eventDetails += `Start: ${startTime.toLocaleString()}\n`;
-  eventDetails += `End: ${endTime.toLocaleString()}\n`;
+  eventDetails += `Start: ${startTime}\n`;
+  eventDetails += `End: ${endTime}\n`;
   eventDetails += `Location: ${response.location?.displayName || 'N/A'}\n`;
   eventDetails += `Online Meeting: ${response.isOnlineMeeting ? 'Yes' : 'No'}\n`;
   
@@ -310,7 +319,7 @@ async function updateCalendarEvent(accessToken, params) {
       } else if (key === 'body') {
         update.body = { contentType: "HTML", content: value };
       } else if (key === 'start' || key === 'end') {
-        update[key] = { dateTime: value, timeZone: "UTC" };
+        update[key] = { dateTime: value, timeZone: config.getMsTimezone() };
       } else {
         update[key] = value;
       }
