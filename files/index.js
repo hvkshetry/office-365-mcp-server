@@ -7,6 +7,7 @@ const { ensureAuthenticated } = require('../auth');
 const { callGraphAPI } = require('../utils/graph-api');
 const config = require('../config');
 const { safeTool } = require('../utils/errors');
+const { validateId } = require('../utils/validate');
 
 /**
  * Build the correct Graph API endpoint for a drive item.
@@ -14,7 +15,9 @@ const { safeTool } = require('../utils/errors');
  * - Otherwise falls back to /me/drive/items/{fileId}               (user's OneDrive)
  */
 function driveItemEndpoint(fileId, driveId) {
+  validateId(fileId, 'fileId');
   if (driveId) {
+    validateId(driveId, 'driveId');
     return `/drives/${driveId}/items/${fileId}`;
   }
   return `/me/drive/items/${fileId}`;
@@ -27,6 +30,7 @@ function driveItemEndpoint(fileId, driveId) {
  */
 function drivePathEndpoint(path, driveId) {
   if (driveId) {
+    validateId(driveId, 'driveId');
     return `/drives/${driveId}/root:${path}`;
   }
   return `/me/drive/root:${path}`;

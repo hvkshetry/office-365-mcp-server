@@ -57,10 +57,15 @@ describe('Files Module', () => {
 
   describe('search operation', () => {
     it('should search for files', async () => {
+      // Default scope is 'all' which uses /search/query (hitsContainers format)
       const mockResults = {
-        value: [
-          { id: 'file1', name: 'budget.xlsx', size: 2048, file: {} }
-        ]
+        value: [{
+          hitsContainers: [{
+            hits: [
+              { resource: { id: 'file1', name: 'budget.xlsx', size: 2048, file: {} } }
+            ]
+          }]
+        }]
       };
 
       callGraphAPI.mockResolvedValue(mockResults);

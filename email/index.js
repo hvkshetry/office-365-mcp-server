@@ -8,6 +8,7 @@ const path = require('path');
 const { ensureAuthenticated } = require('../auth');
 const { callGraphAPI } = require('../utils/graph-api');
 const { safeTool } = require('../utils/errors');
+const { validateId } = require('../utils/validate');
 const config = require('../config');
 
 // Submodule imports
@@ -93,6 +94,7 @@ async function handleEmail(args) {
 async function listEmails(accessToken, params) {
   const { folderId, maxResults = 10, mailbox } = params;
 
+  if (folderId) validateId(folderId, 'folderId');
   const endpoint = folderId ?
     `${config.getMailboxPrefix(mailbox)}/mailFolders/${folderId}/messages` :
     `${config.getMailboxPrefix(mailbox)}/messages`;
@@ -151,6 +153,7 @@ async function readEmail(accessToken, params) {
       }]
     };
   }
+  validateId(emailId, 'emailId');
 
   // Fetch metadata only — attachments listed without downloading content
   const response = await callGraphAPI(

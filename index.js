@@ -15,6 +15,7 @@ const { Server } = require("@modelcontextprotocol/sdk/server/index.js");
 const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio.js");
 const { ListToolsRequestSchema, CallToolRequestSchema, McpError, ErrorCode } = require("@modelcontextprotocol/sdk/types.js");
 const config = require('./config');
+const { auditLog } = require('./utils/audit');
 
 // Import module tools
 const { authTools } = require('./auth');
@@ -76,6 +77,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args = {} } = request.params;
   console.error(`TOOL CALL: ${name}`);
+  auditLog(name, args);
 
   const tool = TOOLS.find(t => t.name === name);
   if (!tool) {
