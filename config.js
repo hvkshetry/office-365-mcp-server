@@ -55,6 +55,10 @@ module.exports = {
   // With .Shared scopes, use users/{mailbox} for shared mailbox access
   getMailboxPrefix(mailbox) {
     if (mailbox && mailbox !== 'me') {
+      // Validate mailbox looks like an email address or simple identifier
+      if (/[\/\\]|\.\./.test(mailbox)) {
+        throw new Error('Invalid mailbox: contains disallowed characters');
+      }
       return `users/${mailbox}`;
     }
     return 'me';

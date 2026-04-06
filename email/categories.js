@@ -4,6 +4,7 @@
 
 const { ensureAuthenticated } = require('../auth');
 const { callGraphAPI } = require('../utils/graph-api');
+const { validateId } = require('../utils/validate');
 const config = require('../config');
 
 /**
@@ -114,6 +115,7 @@ async function updateCategory(accessToken, params) {
     };
   }
 
+  validateId(categoryId, 'categoryId');
   const update = {};
   if (displayName) update.displayName = displayName;
   if (color) update.color = color;
@@ -139,6 +141,7 @@ async function deleteCategory(accessToken, params) {
     };
   }
 
+  validateId(categoryId, 'categoryId');
   await callGraphAPI(
     accessToken,
     'DELETE',
@@ -161,6 +164,7 @@ async function applyCategory(accessToken, params) {
       }]
     };
   }
+  validateId(emailId, 'emailId');
 
   await callGraphAPI(
     accessToken,
@@ -182,6 +186,7 @@ async function removeCategory(accessToken, params) {
       content: [{ type: "text", text: "Missing required parameters: emailId and categories" }]
     };
   }
+  validateId(emailId, 'emailId');
 
   // Get current categories, then remove the specified ones
   const email = await callGraphAPI(

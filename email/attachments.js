@@ -3,6 +3,7 @@
  */
 
 const { callGraphAPI } = require('../utils/graph-api');
+const { validateId } = require('../utils/validate');
 const config = require('../config');
 const fs = require('fs');
 const path = require('path');
@@ -92,6 +93,8 @@ async function downloadEmbeddedAttachment(attachment, emailId, accessToken) {
       fileData = Buffer.from(attachment.contentBytes, 'base64');
     } else {
       // Large file - fetch using /$value endpoint
+      validateId(emailId, 'emailId');
+      validateId(attachment.id, 'attachmentId');
       const binaryData = await callGraphAPI(
         accessToken,
         'GET',

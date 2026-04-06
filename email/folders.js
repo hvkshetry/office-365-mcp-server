@@ -4,6 +4,7 @@
 
 const { ensureAuthenticated } = require('../auth');
 const { callGraphAPI } = require('../utils/graph-api');
+const { validateId } = require('../utils/validate');
 const config = require('../config');
 
 /**
@@ -88,6 +89,7 @@ async function moveEmails(accessToken, params) {
   const results = [];
 
   for (const emailId of emailIds) {
+    validateId(emailId, 'emailId');
     try {
       await callGraphAPI(
         accessToken,
@@ -255,6 +257,7 @@ async function createEmailFolder(accessToken, params) {
     };
   }
 
+  if (parentFolderId) validateId(parentFolderId, 'parentFolderId');
   const endpoint = parentFolderId
     ? `${config.getMailboxPrefix(mailbox)}/mailFolders/${parentFolderId}/childFolders`
     : `${config.getMailboxPrefix(mailbox)}/mailFolders`;

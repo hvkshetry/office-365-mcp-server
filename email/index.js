@@ -227,6 +227,8 @@ async function getAttachment(accessToken, params) {
       }]
     };
   }
+  validateId(emailId, 'emailId');
+  validateId(attachmentId, 'attachmentId');
 
   try {
     // Fetch single attachment with full content
@@ -452,6 +454,7 @@ async function replyToEmail(accessToken, params) {
         }]
       };
     }
+    validateId(params.emailId, 'emailId');
 
     // Use comment (not message.body) so Graph preserves the quoted original message.
     // message.body replaces the entire reply body, wiping the original.
@@ -638,6 +641,7 @@ async function updateDraft(accessToken, params) {
         }]
       };
     }
+    validateId(draftId, 'draftId');
 
     const updateMessage = {};
 
@@ -707,6 +711,7 @@ async function sendDraft(accessToken, params) {
         }]
       };
     }
+    validateId(draftId, 'draftId');
 
     await callGraphAPI(
       accessToken,

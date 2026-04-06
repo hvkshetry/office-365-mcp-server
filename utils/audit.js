@@ -47,7 +47,10 @@ function auditLog(toolName, args) {
       tool: toolName,
       ...params,
     };
-    fs.appendFileSync(AUDIT_LOG_PATH, JSON.stringify(entry) + '\n');
+    const line = JSON.stringify(entry) + '\n';
+    const fd = fs.openSync(AUDIT_LOG_PATH, 'a', 0o600);
+    fs.writeSync(fd, line);
+    fs.closeSync(fd);
   } catch (err) {
     console.error('[AUDIT] Failed to write audit log:', err.message);
   }

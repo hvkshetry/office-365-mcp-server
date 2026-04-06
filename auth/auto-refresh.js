@@ -31,7 +31,7 @@ async function refreshAccessToken() {
     // Prepare refresh request
     const clientId = process.env.OFFICE_CLIENT_ID || config.AUTH_CONFIG.clientId;
     const clientSecret = process.env.OFFICE_CLIENT_SECRET || config.AUTH_CONFIG.clientSecret;
-    const tenantId = process.env.OFFICE_TENANT_ID || 'common';
+    const tenantId = process.env.OFFICE_TENANT_ID || 'organizations';
     
     if (!clientId || !clientSecret) {
       throw new Error('Missing client credentials. Check OFFICE_CLIENT_ID and OFFICE_CLIENT_SECRET.');

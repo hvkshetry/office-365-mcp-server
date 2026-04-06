@@ -42,7 +42,9 @@ function drivePathEndpoint(path, driveId) {
  * - Otherwise falls back to /me/drive/items/{parentId}               (user's OneDrive)
  */
 function driveParentEndpoint(parentId, driveId) {
+  validateId(parentId, 'parentId');
   if (driveId) {
+    validateId(driveId, 'driveId');
     return `/drives/${driveId}/items/${parentId}`;
   }
   return `/me/drive/items/${parentId}`;
@@ -117,6 +119,11 @@ async function listFiles(accessToken, params) {
   
   let endpoint = path;
   
+  // Validate IDs before interpolation
+  if (siteId) validateId(siteId, 'siteId');
+  if (driveId) validateId(driveId, 'driveId');
+  if (folderId) validateId(folderId, 'folderId');
+
   // Handle different contexts
   if (siteId && driveId) {
     endpoint = `/sites/${siteId}/drives/${driveId}/root`;

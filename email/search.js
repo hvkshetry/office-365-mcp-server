@@ -7,6 +7,7 @@
 
 const { ensureAuthenticated } = require('../auth');
 const { callGraphAPI } = require('../utils/graph-api');
+const { validateId } = require('../utils/validate');
 const config = require('../config');
 const { getFolderIdByName } = require('./folders');
 
@@ -43,6 +44,7 @@ async function handleEmailSearch(args) {
     let folderToSearch = null;
 
     if (folderId) {
+      validateId(folderId, 'folderId');
       folderToSearch = folderId;
     } else if (folderName) {
       // Convert folder name to ID

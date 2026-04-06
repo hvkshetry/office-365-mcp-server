@@ -82,7 +82,7 @@ app.get('/auth', (req, res) => {
   // Load environment variables or use config
   const clientId = process.env.OFFICE_CLIENT_ID || '';
   const clientSecret = process.env.OFFICE_CLIENT_SECRET || '';
-  const tenantId = process.env.OFFICE_TENANT_ID || 'common';
+  const tenantId = process.env.OFFICE_TENANT_ID || 'organizations';
   
   // Verify credentials are set
   if (!clientId || !clientSecret) {
@@ -252,7 +252,7 @@ function exchangeCodeForTokens(code) {
   return new Promise((resolve, reject) => {
     const clientId = process.env.OFFICE_CLIENT_ID || '';
     const clientSecret = process.env.OFFICE_CLIENT_SECRET || '';
-    const tenantId = process.env.OFFICE_TENANT_ID || 'common';
+    const tenantId = process.env.OFFICE_TENANT_ID || 'organizations';
     
     const postData = new URLSearchParams({
       client_id: clientId,
