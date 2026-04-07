@@ -1,6 +1,7 @@
 const { ensureAuthenticated } = require('../auth');
 const { callGraphAPI } = require('../utils/graph-api');
 const { safeTool } = require('../utils/errors');
+const { enforcePlannerPolicy, recordSideEffect } = require('../policy');
 
 /**
  * Consolidated Planner Module - Reduces 18 tools to 8 tools
@@ -640,52 +641,93 @@ async function handlePlanner(args) {
     };
   }
 
-  switch (entity) {
-    case 'plan':
-      return await handlePlanOperations({ operation, ...params });
+  const policyError = await enforcePlannerPolicy({ entity, operation, ...params });
+  if (policyError) {
+    return {
+      content: [{
+        type: "text",
+        text: policyError
+      }]
+    };
+  }
 
-    case 'task':
-      // Route to appropriate task handler based on operation
-      switch (operation) {
-        case 'list':
-        case 'create':
-        case 'update':
-        case 'delete':
-        case 'get':
-        case 'assign':
-          return await handleTaskOperations({ operation, ...params });
-        case 'get_details':
-          return await handleTaskDetails(params);
-        case 'update_assignments':
-          return await handleTaskEnhanced({ operation: 'update_assignments', ...params });
-        case 'bulk_update':
-          return await handleBulkOperations({ operation: 'update', ...params });
-        case 'bulk_delete':
-          return await handleBulkOperations({ operation: 'delete', ...params });
-        case 'get_assignments':
-          return await handleTaskAssignments({ operation: 'get', ...params });
-        default:
-          return {
-            content: [{
-              type: "text",
-              text: `Invalid task operation: ${operation}. Valid: list, create, update, delete, get, assign, get_details, update_assignments, get_assignments, bulk_update, bulk_delete`
-            }]
-          };
-      }
+  try {
+    let result;
+    switch (entity) {
+      case 'plan':
+        result = await handlePlanOperations({ operation, ...params });
+        break;
 
-    case 'bucket':
-      return await handleBucketOperations({ operation, ...params });
+      case 'task':
+        // Route to appropriate task handler based on operation
+        switch (operation) {
+          case 'list':
+          case 'create':
+          case 'update':
+          case 'delete':
+          case 'get':
+          case 'assign':
+            result = await handleTaskOperations({ operation, ...params });
+            break;
+          case 'get_details':
+            result = await handleTaskDetails(params);
+            break;
+          case 'update_assignments':
+            result = await handleTaskEnhanced({ operation: 'update_assignments', ...params });
+            break;
+          case 'bulk_update':
+            result = await handleBulkOperations({ operation: 'update', ...params });
+            break;
+          case 'bulk_delete':
+            result = await handleBulkOperations({ operation: 'delete', ...params });
+            break;
+          case 'get_assignments':
+            result = await handleTaskAssignments({ operation: 'get', ...params });
+            break;
+          default:
+            return {
+              content: [{
+                type: "text",
+                text: `Invalid task operation: ${operation}. Valid: list, create, update, delete, get, assign, get_details, update_assignments, get_assignments, bulk_update, bulk_delete`
+              }]
+            };
+        }
+        break;
 
-    case 'user':
-      return await handleUserLookup(params);
+      case 'bucket':
+        result = await handleBucketOperations({ operation, ...params });
+        break;
 
-    default:
-      return {
-        content: [{
-          type: "text",
-          text: `Invalid entity: ${entity}. Valid entities: plan, task, bucket, user`
-        }]
-      };
+      case 'user':
+        result = await handleUserLookup(params);
+        break;
+
+      default:
+        return {
+          content: [{
+            type: "text",
+            text: `Invalid entity: ${entity}. Valid entities: plan, task, bucket, user`
+          }]
+        };
+    }
+
+    if (!['list', 'get', 'get_details', 'get_assignments', 'get_tasks', 'lookup'].includes(operation)) {
+      await recordSideEffect('planner.write', 'success', params.taskId || params.planId || params.bucketId || null, {
+        entity,
+        operation
+      });
+    }
+
+    return result;
+  } catch (error) {
+    if (!['list', 'get', 'get_details', 'get_assignments', 'get_tasks', 'lookup'].includes(operation)) {
+      await recordSideEffect('planner.write', 'failed', params.taskId || params.planId || params.bucketId || null, {
+        entity,
+        operation,
+        error: error.message
+      });
+    }
+    throw error;
   }
 }
 

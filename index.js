@@ -121,7 +121,7 @@ if (config.TRANSPORT_TYPE === 'http') {
 
   app.post("/message", async (req, res) => {
     if (sseTransport) {
-      await sseTransport.handlePostMessage(req, res);
+      await sseTransport.handlePostMessage(req, res, req.body);
     } else {
       res.status(503).json({ error: "No SSE connection" });
     }

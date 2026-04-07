@@ -7,6 +7,7 @@ const { ensureAuthenticated } = require('../auth');
 const { callGraphAPI } = require('../utils/graph-api');
 const config = require('../config');
 const { safeTool } = require('../utils/errors');
+const { enforceCalendarPolicy, recordSideEffect } = require('../policy');
 
 /**
  * Check if a datetime string already has a timezone indicator (Z, +offset, or -offset).
@@ -33,21 +34,36 @@ async function handleCalendar(args) {
       }]
     };
   }
-  
+
+  const policyError = await enforceCalendarPolicy({ operation, ...params });
+  if (policyError) {
+    return {
+      content: [{
+        type: "text",
+        text: policyError
+      }]
+    };
+  }
+
   try {
     const accessToken = await ensureAuthenticated();
-    
+    let result;
     switch (operation) {
       case 'list':
-        return await listCalendarEvents(accessToken, params);
+        result = await listCalendarEvents(accessToken, params);
+        break;
       case 'create':
-        return await createCalendarEvent(accessToken, params);
+        result = await createCalendarEvent(accessToken, params);
+        break;
       case 'get':
-        return await getCalendarEvent(accessToken, params);
+        result = await getCalendarEvent(accessToken, params);
+        break;
       case 'update':
-        return await updateCalendarEvent(accessToken, params);
+        result = await updateCalendarEvent(accessToken, params);
+        break;
       case 'delete':
-        return await deleteCalendarEvent(accessToken, params);
+        result = await deleteCalendarEvent(accessToken, params);
+        break;
       default:
         return {
           content: [{ 
@@ -56,7 +72,22 @@ async function handleCalendar(args) {
           }]
         };
     }
+
+    if (!['list', 'get'].includes(operation)) {
+      await recordSideEffect('calendar.write', 'success', params.eventId || null, {
+        operation,
+        subject: params.subject || null
+      });
+    }
+
+    return result;
   } catch (error) {
+    if (!['list', 'get'].includes(operation)) {
+      await recordSideEffect('calendar.write', 'failed', params.eventId || null, {
+        operation,
+        error: error.message
+      });
+    }
     console.error(`Error in calendar ${operation}:`, error);
     return {
       content: [{ type: "text", text: `Error in calendar ${operation}: ${error.message}` }]

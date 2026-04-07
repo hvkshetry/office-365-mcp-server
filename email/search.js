@@ -116,9 +116,12 @@ async function handleEmailSearch(args) {
     }
 
     // Three-tier execution strategy
+    // External mailbox: skip Tier 1 (/search/query) which doesn't scope to other users
+    // and returns immutable IDs incompatible with read/get_attachment across mailboxes.
+    // Tier 2 ($search on the scoped REST endpoint) handles external mailboxes correctly.
 
-    // Tier 1: Try Microsoft Search API (most powerful) - skip if folder is specified
-    if ((useRelevance || isComplexKQLQuery(kqlQuery)) && !folderToSearch) {
+    // Tier 1: Try Microsoft Search API (most powerful) - skip if folder or external mailbox
+    if ((useRelevance || isComplexKQLQuery(kqlQuery)) && !folderToSearch && (!mailbox || mailbox === 'me')) {
       try {
         return await searchUsingMicrosoftSearchAPI(accessToken, {
           query: kqlQuery,
