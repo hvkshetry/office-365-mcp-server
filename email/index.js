@@ -60,6 +60,203 @@ function buildFileAttachments(filePaths) {
   });
 }
 
+function normalizeEmailAddress(address) {
+  return String(address || '').trim().toLowerCase();
+}
+
+function recipientAddress(recipient) {
+  if (!recipient) return null;
+  if (typeof recipient === 'string') return recipient;
+  return recipient.emailAddress?.address || recipient.address || null;
+}
+
+function recipientName(recipient) {
+  if (!recipient || typeof recipient === 'string') return null;
+  return recipient.emailAddress?.name || recipient.name || null;
+}
+
+function addUniqueRecipient(recipients, seenAddresses, recipient, selfAddresses = new Set()) {
+  const address = recipientAddress(recipient);
+  const normalized = normalizeEmailAddress(address);
+  if (!normalized || selfAddresses.has(normalized) || seenAddresses.has(normalized)) {
+    return;
+  }
+
+  const emailAddress = { address };
+  const name = recipientName(recipient);
+  if (name) {
+    emailAddress.name = name;
+  }
+
+  recipients.push({ emailAddress });
+  seenAddresses.add(normalized);
+}
+
+function addUniqueRecipients(recipients, seenAddresses, sourceRecipients, selfAddresses = new Set()) {
+  const items = Array.isArray(sourceRecipients) ? sourceRecipients : [sourceRecipients];
+  for (const recipient of items) {
+    addUniqueRecipient(recipients, seenAddresses, recipient, selfAddresses);
+  }
+}
+
+function recipientsFromParam(value, selfAddresses = new Set()) {
+  const recipients = [];
+  const seenAddresses = new Set();
+  addUniqueRecipients(recipients, seenAddresses, value, selfAddresses);
+  return recipients;
+}
+
+function buildReplySubject(subject) {
+  const originalSubject = subject || '';
+  return /^\s*re\s*:/i.test(originalSubject) ? originalSubject : `Re: ${originalSubject}`;
+}
+
+function isReplyActionRoutingError(error) {
+  const graphError = error?.graphError || {};
+  const details = [
+    error?.message,
+    graphError.code,
+    graphError.message,
+    graphError.innerError?.code,
+    graphError.innerError?.message
+  ].filter(Boolean).join(' ');
+
+  if (!/Mailbox move in progress|Cross Server access is not allowed|ErrorMailboxMoveInProgress/i.test(details)) {
+    return false;
+  }
+
+  return error?.statusCode === 503 ||
+    graphError.statusCode === 503 ||
+    /status\s+503/i.test(String(error?.message || ''));
+}
+
+async function getMailboxOwnerAddresses(accessToken, mailbox) {
+  const addresses = new Set();
+  if (mailbox && mailbox !== 'me') {
+    addresses.add(normalizeEmailAddress(mailbox));
+    return addresses;
+  }
+
+  try {
+    const profile = await callGraphAPI(accessToken, 'GET', 'me', null, {
+      $select: 'mail,userPrincipalName'
+    });
+    if (profile.mail) addresses.add(normalizeEmailAddress(profile.mail));
+    if (profile.userPrincipalName) addresses.add(normalizeEmailAddress(profile.userPrincipalName));
+  } catch (error) {
+    console.error('[EMAIL] Could not resolve current mailbox owner for reply fallback:', error.message);
+  }
+
+  return addresses;
+}
+
+async function fetchReplySourceMessage(accessToken, prefix, emailId) {
+  return await callGraphAPI(
+    accessToken,
+    'GET',
+    `${prefix}/messages/${emailId}`,
+    null,
+    {
+      $select: 'subject,from,sender,replyTo,toRecipients,ccRecipients,internetMessageId,conversationId'
+    }
+  );
+}
+
+function buildFallbackReplyRecipients(originalMessage, params, selfAddresses) {
+  let toRecipients;
+  let ccRecipients;
+
+  if (params.to) {
+    toRecipients = recipientsFromParam(params.to, selfAddresses);
+  } else {
+    toRecipients = [];
+    const toSeen = new Set();
+    addUniqueRecipient(toRecipients, toSeen, originalMessage.sender || originalMessage.from, selfAddresses);
+    addUniqueRecipients(toRecipients, toSeen, originalMessage.replyTo || [], selfAddresses);
+    if (params.replyAll) {
+      addUniqueRecipients(toRecipients, toSeen, originalMessage.toRecipients || [], selfAddresses);
+    }
+  }
+
+  if (params.cc) {
+    ccRecipients = recipientsFromParam(params.cc, selfAddresses);
+  } else {
+    ccRecipients = [];
+    if (params.replyAll) {
+      const ccSeen = new Set(toRecipients.map(r => normalizeEmailAddress(r.emailAddress?.address)));
+      addUniqueRecipients(ccRecipients, ccSeen, originalMessage.ccRecipients || [], selfAddresses);
+    }
+  }
+
+  return { toRecipients, ccRecipients };
+}
+
+async function sendReplyViaDraftFallback(accessToken, params, prefix, fileAttachments = []) {
+  console.error('[EMAIL] Reply action hit mailbox routing error; using draft-send fallback');
+
+  const [originalMessage, selfAddresses] = await Promise.all([
+    fetchReplySourceMessage(accessToken, prefix, params.emailId),
+    getMailboxOwnerAddresses(accessToken, params.mailbox)
+  ]);
+
+  const { toRecipients, ccRecipients } = buildFallbackReplyRecipients(originalMessage, params, selfAddresses);
+  if (toRecipients.length === 0) {
+    throw new Error('Unable to determine reply recipients for draft-send fallback');
+  }
+
+  const draftMessage = {
+    subject: buildReplySubject(originalMessage.subject),
+    body: {
+      contentType: 'HTML',
+      content: wrapHtmlBody(params.body)
+    },
+    toRecipients
+  };
+
+  if (ccRecipients.length > 0) {
+    draftMessage.ccRecipients = ccRecipients;
+  }
+
+  if (originalMessage.internetMessageId) {
+    draftMessage.internetMessageHeaders = [
+      { name: 'In-Reply-To', value: originalMessage.internetMessageId },
+      { name: 'References', value: originalMessage.internetMessageId }
+    ];
+  }
+
+  const draft = await callGraphAPI(
+    accessToken,
+    'POST',
+    `${prefix}/messages`,
+    draftMessage,
+    null
+  );
+
+  for (const attachment of fileAttachments) {
+    await callGraphAPI(
+      accessToken,
+      'POST',
+      `${prefix}/messages/${draft.id}/attachments`,
+      attachment,
+      null
+    );
+  }
+
+  await callGraphAPI(
+    accessToken,
+    'POST',
+    `${prefix}/messages/${draft.id}/send`,
+    null,
+    null
+  );
+
+  return {
+    draftId: draft.id,
+    conversationId: originalMessage.conversationId || null,
+    attachments: fileAttachments.length
+  };
+}
+
 // ============== CORE EMAIL CRUD ==============
 
 /**
@@ -561,72 +758,96 @@ async function replyToEmail(accessToken, params) {
     }
 
     const prefix = config.getMailboxPrefix(params.mailbox);
+    const fileAttachments = params.attachments && params.attachments.length > 0
+      ? buildFileAttachments(params.attachments)
+      : [];
+    const hasAttachments = fileAttachments.length > 0;
 
-    // If attachments are provided, use createReply → addAttachments → send
-    // because the /reply endpoint doesn't support inline attachments
-    if (params.attachments && params.attachments.length > 0) {
-      const fileAttachments = buildFileAttachments(params.attachments);
+    try {
+      // If attachments are provided, use createReply -> addAttachments -> send
+      // because the /reply endpoint doesn't support inline attachments.
+      if (hasAttachments) {
+        const replyAction = params.replyAll ? 'createReplyAll' : 'createReply';
+        const draft = await callGraphAPI(
+          accessToken,
+          'POST',
+          `${prefix}/messages/${params.emailId}/${replyAction}`,
+          replyPayload,
+          null
+        );
 
-      // Step 1: Create reply draft
-      const replyAction = params.replyAll ? 'createReplyAll' : 'createReply';
-      const draft = await callGraphAPI(
-        accessToken,
-        'POST',
-        `${prefix}/messages/${params.emailId}/${replyAction}`,
-        replyPayload,
-        null
-      );
+        for (const att of fileAttachments) {
+          await callGraphAPI(
+            accessToken,
+            'POST',
+            `${prefix}/messages/${draft.id}/attachments`,
+            att,
+            null
+          );
+        }
 
-      // Step 2: Add attachments to draft
-      for (const att of fileAttachments) {
         await callGraphAPI(
           accessToken,
           'POST',
-          `${prefix}/messages/${draft.id}/attachments`,
-          att,
+          `${prefix}/messages/${draft.id}/send`,
+          null,
           null
         );
+
+        await recordSideEffect('mail.reply', 'success', params.mailbox || null, {
+          emailId: params.emailId,
+          replyAll: !!params.replyAll,
+          attachments: fileAttachments.length
+        });
+        return {
+          content: [{ type: "text", text: `Reply sent successfully with ${fileAttachments.length} attachment(s)! The reply is threaded under the original email.` }]
+        };
       }
 
-      // Step 3: Send the draft
+      const replyEndpoint = params.replyAll
+        ? `${prefix}/messages/${params.emailId}/replyAll`
+        : `${prefix}/messages/${params.emailId}/reply`;
       await callGraphAPI(
         accessToken,
         'POST',
-        `${prefix}/messages/${draft.id}/send`,
-        null,
+        replyEndpoint,
+        replyPayload,
         null
       );
 
       await recordSideEffect('mail.reply', 'success', params.mailbox || null, {
         emailId: params.emailId,
         replyAll: !!params.replyAll,
-        attachments: fileAttachments.length
+        attachments: 0
       });
       return {
-        content: [{ type: "text", text: `Reply sent successfully with ${fileAttachments.length} attachment(s)! The reply is threaded under the original email.` }]
+        content: [{ type: "text", text: "Reply sent successfully! The reply is threaded under the original email." }]
+      };
+    } catch (actionError) {
+      if (!isReplyActionRoutingError(actionError)) {
+        throw actionError;
+      }
+
+      const fallback = await sendReplyViaDraftFallback(accessToken, params, prefix, fileAttachments);
+
+      await recordSideEffect('mail.reply', 'success', params.mailbox || null, {
+        emailId: params.emailId,
+        replyAll: !!params.replyAll,
+        attachments: fallback.attachments,
+        fallback: 'draft-send',
+        draftId: fallback.draftId,
+        conversationId: fallback.conversationId
+      });
+
+      const attachMsg = fallback.attachments > 0 ? ` with ${fallback.attachments} attachment(s)` : '';
+      return {
+        fallback: 'draft-send',
+        content: [{
+          type: "text",
+          text: `Reply sent successfully${attachMsg} via fallback: draft-send.`
+        }]
       };
     }
-
-    // No attachments — use direct reply endpoint
-    const replyEndpoint = params.replyAll
-      ? `${prefix}/messages/${params.emailId}/replyAll`
-      : `${prefix}/messages/${params.emailId}/reply`;
-    await callGraphAPI(
-      accessToken,
-      'POST',
-      replyEndpoint,
-      replyPayload,
-      null
-    );
-
-    await recordSideEffect('mail.reply', 'success', params.mailbox || null, {
-      emailId: params.emailId,
-      replyAll: !!params.replyAll,
-      attachments: 0
-    });
-    return {
-      content: [{ type: "text", text: "Reply sent successfully! The reply is threaded under the original email." }]
-    };
   } catch (error) {
     console.error('[EMAIL] Reply error:', error.message);
     await recordSideEffect('mail.reply', 'failed', params?.mailbox || null, {
@@ -1046,7 +1267,7 @@ async function handleMail(args) {
 const emailTools = [
   {
     name: "mail",
-    description: "Unified email management: list, read, send, reply, draft, search, move, folders, rules, categories, and focused inbox",
+    description: "Unified email management: list, read, send, reply, draft, search, move, folders, rules, categories, and focused inbox. Reply auto-falls back to draft-send when Graph reply actions return mailbox move or cross-server 503 routing errors.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1084,7 +1305,7 @@ const emailTools = [
           items: { type: "string" },
           description: "BCC recipients"
         },
-        replyAll: { type: "boolean", description: "Reply to all recipients (for reply). Default: false" },
+        replyAll: { type: "boolean", description: "Reply to all recipients (for reply). Default: false. Reply may return fallback: 'draft-send' if Graph reply actions hit mailbox routing errors." },
         attachments: {
           type: "array",
           items: { type: "string" },

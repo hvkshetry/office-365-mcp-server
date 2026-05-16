@@ -23,12 +23,74 @@ const ERROR_SUGGESTIONS = {
   503: 'Service temporarily unavailable. The request will be retried automatically.'
 };
 
+const MAILBOX_SCOPED_RESOURCES = new Set([
+  'messages',
+  'mailFolders',
+  'sendMail',
+  'mailboxSettings'
+]);
+
 /**
  * Sleep for specified milliseconds
  * @param {number} ms - Milliseconds to sleep
  */
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function getHeaderValue(headers, name) {
+  const match = Object.keys(headers || {}).find(key => key.toLowerCase() === name.toLowerCase());
+  return match ? headers[match] : undefined;
+}
+
+function hasHeader(headers, name) {
+  return getHeaderValue(headers, name) !== undefined;
+}
+
+function getAnchorMailboxFromPath(path) {
+  const match = String(path || '').match(/^\/?users\/([^/?#]+)(?:\/([^/?#]+))?/i);
+  if (!match || !match[2] || !MAILBOX_SCOPED_RESOURCES.has(match[2])) {
+    return null;
+  }
+
+  try {
+    return decodeURIComponent(match[1]);
+  } catch (error) {
+    return match[1];
+  }
+}
+
+function normalizeGraphError(statusCode, parsedError, rawBody, responseHeaders = {}) {
+  const graphBody = parsedError?.error || parsedError || {};
+  const innerError = graphBody.innerError || graphBody.innererror || null;
+  const requestId = innerError?.['request-id'] ||
+    innerError?.requestId ||
+    responseHeaders['request-id'] ||
+    responseHeaders['client-request-id'] ||
+    null;
+
+  return {
+    statusCode,
+    code: graphBody.code || null,
+    message: graphBody.message || (typeof rawBody === 'string' ? rawBody : null),
+    innerError,
+    requestId,
+    date: innerError?.date || responseHeaders.date || null
+  };
+}
+
+function createGraphAPIError(statusCode, responseData, parsedError, responseHeaders = {}) {
+  const graphError = normalizeGraphError(statusCode, parsedError, responseData, responseHeaders);
+  const errorMessage = graphError.message || responseData;
+  const suggestion = ERROR_SUGGESTIONS[statusCode] || '';
+  const fullMessage = suggestion
+    ? `API call failed with status ${statusCode}: ${errorMessage}\nSuggestion: ${suggestion}`
+    : `API call failed with status ${statusCode}: ${errorMessage}`;
+
+  const error = new Error(fullMessage);
+  error.statusCode = statusCode;
+  error.graphError = graphError;
+  return error;
 }
 
 /**
@@ -136,8 +198,15 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
       console.error(`[GRAPH-API] Full URL: ${url}`);
     }
     
+    customHeaders = { ...(customHeaders || {}) };
+
+    const anchorMailbox = getAnchorMailboxFromPath(path);
+    if (anchorMailbox && !hasHeader(customHeaders, 'X-AnchorMailbox')) {
+      customHeaders['X-AnchorMailbox'] = anchorMailbox;
+    }
+
     // Determine if this is a binary request/response based on Content-Type
-    const requestContentType = customHeaders['Content-Type'] || 'application/json';
+    const requestContentType = getHeaderValue(customHeaders, 'Content-Type') || 'application/json';
     const isBinaryRequest = requestContentType.includes('application/octet-stream') ||
                            requestContentType.includes('image/') ||
                            requestContentType.includes('audio/') ||
@@ -207,10 +276,6 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
                 reject(new Error(`Error parsing API response: ${error.message}`));
               }
             }
-          } else if (res.statusCode === 401) {
-            // Token expired or invalid
-            const suggestion = ERROR_SUGGESTIONS[401];
-            reject(new Error(`UNAUTHORIZED: ${suggestion}`));
           } else {
             // Handle other errors with retry logic
             const shouldRetry = RETRY_CONFIG.retryableErrors.includes(res.statusCode) && 
@@ -233,21 +298,12 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
               return;
             }
             
-            // Parse error and add suggestions
+            // Parse error and add suggestions while preserving the structured Graph error.
             try {
               const errorData = JSON.parse(responseData);
-              const errorMessage = errorData.error?.message || responseData;
-              const suggestion = ERROR_SUGGESTIONS[res.statusCode] || '';
-              const fullMessage = suggestion 
-                ? `API call failed with status ${res.statusCode}: ${errorMessage}\nSuggestion: ${suggestion}`
-                : `API call failed with status ${res.statusCode}: ${errorMessage}`;
-              reject(new Error(fullMessage));
+              reject(createGraphAPIError(res.statusCode, responseData, errorData, res.headers));
             } catch (parseError) {
-              const suggestion = ERROR_SUGGESTIONS[res.statusCode] || '';
-              const fullMessage = suggestion
-                ? `API call failed with status ${res.statusCode}: ${responseData}\nSuggestion: ${suggestion}`
-                : `API call failed with status ${res.statusCode}: ${responseData}`;
-              reject(new Error(fullMessage));
+              reject(createGraphAPIError(res.statusCode, responseData, null, res.headers));
             }
           }
         });
@@ -277,5 +333,7 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
 }
 
 module.exports = {
-  callGraphAPI
+  callGraphAPI,
+  getAnchorMailboxFromPath,
+  createGraphAPIError
 };
