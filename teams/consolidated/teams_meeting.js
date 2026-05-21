@@ -916,79 +916,131 @@ async function getMeetingParticipants(accessToken, params) {
 }
 
 /**
- * Get meeting insights (summary, action items, etc.)
+ * Get meeting insights (summary, action items, mentions) via the Copilot AI Insights API.
+ *
+ * Requires the OnlineMeetingAiInsight.Read.All scope and a Microsoft 365 Copilot licence.
+ * Returns structured meeting notes, action items with owners, and participant mentions.
+ *
+ * @see https://learn.microsoft.com/en-us/microsoft-365-copilot/extensibility/api/ai-services/meeting-insights/onlinemeeting-list-aiinsights
  */
 async function getMeetingInsights(accessToken, params) {
   const { meetingId } = params;
-  
+
   if (!meetingId) {
     return {
-      content: [{ 
-        type: "text", 
-        text: "Missing required parameter: meetingId" 
+      content: [{
+        type: "text",
+        text: "Missing required parameter: meetingId"
       }]
     };
   }
-  
+
   try {
-    // Try to get meeting insights if available
-    const response = await callGraphAPI(
-      accessToken,
-      'GET',
-      `me/onlineMeetings/${meetingId}/meetingAiInsights`
-    );
-    
-    let insightsText = '';
-    
-    if (response.meetingSummary) {
-      insightsText += "## Meeting Summary\n\n";
-      insightsText += `${response.meetingSummary}\n\n`;
+    // Step 1: Get the user's Object ID (required by the /copilot/users/{id} endpoint)
+    const userProfile = await callGraphAPI(accessToken, 'GET', 'me', null, { $select: 'id' });
+    const userId = userProfile.id;
+
+    // Step 2: Convert thread ID to online meeting ID if needed.
+    // Callers often pass a thread ID (19:meeting_XXX@thread.v2) from the meeting chat,
+    // but the AI Insights API requires the online meeting ID (MSoXXX...).
+    let actualMeetingId = meetingId;
+    const isThreadId = meetingId.includes('@thread.v2');
+
+    if (isThreadId) {
+      try {
+        console.error('Converting thread ID to meeting ID for insights');
+        actualMeetingId = await convertThreadIdToMeetingId(accessToken, meetingId);
+        console.error('Conversion successful. Meeting ID:', actualMeetingId);
+      } catch (conversionError) {
+        return {
+          content: [{
+            type: "text",
+            text: `Unable to convert thread ID to meeting ID for insights: ${conversionError.message}`
+          }]
+        };
+      }
     }
-    
-    if (response.actionItems && response.actionItems.length > 0) {
-      insightsText += "## Action Items\n\n";
-      response.actionItems.forEach((item, index) => {
-        insightsText += `${index + 1}. ${item.description}`;
-        if (item.assignees && item.assignees.length > 0) {
-          insightsText += ` (Assigned to: ${item.assignees.map(a => a.name || a.email).join(', ')})`;
-        }
-        insightsText += '\n';
-      });
-      insightsText += '\n';
-    }
-    
-    if (response.followUps && response.followUps.length > 0) {
-      insightsText += "## Follow-Ups\n\n";
-      response.followUps.forEach((item, index) => {
-        insightsText += `${index + 1}. ${item.description}`;
-        if (item.assignees && item.assignees.length > 0) {
-          insightsText += ` (For: ${item.assignees.map(a => a.name || a.email).join(', ')})`;
-        }
-        insightsText += '\n';
-      });
-      insightsText += '\n';
-    }
-    
-    if (!insightsText) {
+
+    // Step 3: List all AI insights for this meeting.
+    // The list endpoint returns metadata only (IDs and dates), not the full content.
+    const basePath = `copilot/users/${userId}/onlineMeetings/${actualMeetingId}/aiInsights`;
+    const listResponse = await callGraphAPI(accessToken, 'GET', basePath);
+
+    const insightsList = listResponse.value || [];
+    if (insightsList.length === 0) {
       return {
-        content: [{ 
-          type: "text", 
-          text: "No meeting insights available for this meeting. Insights are typically generated after a meeting ends and might take some time to become available." 
+        content: [{
+          type: "text",
+          text: "No meeting insights available for this meeting. Insights require a Microsoft 365 Copilot licence and are generated after the meeting ends with transcription enabled."
         }]
       };
     }
-    
+
+    // Step 4: Fetch full details of the most recent insight.
+    // Each recurring meeting instance has its own insight entry.
+    insightsList.sort((a, b) => new Date(b.createdDateTime) - new Date(a.createdDateTime));
+    const latestInsight = insightsList[0];
+
+    const insight = await callGraphAPI(
+      accessToken,
+      'GET',
+      `${basePath}/${encodeURIComponent(latestInsight.id)}`
+    );
+
+    let insightsText = '';
+    insightsText += `**Date:** ${new Date(insight.createdDateTime).toLocaleString()}\n\n`;
+
+    // Meeting notes (hierarchical: topics with subpoints)
+    if (insight.meetingNotes && insight.meetingNotes.length > 0) {
+      insightsText += "## Meeting Notes\n\n";
+      insight.meetingNotes.forEach((note) => {
+        insightsText += `### ${note.title || 'Topic'}\n`;
+        insightsText += `${note.text}\n\n`;
+        if (note.subpoints && note.subpoints.length > 0) {
+          note.subpoints.forEach((sub) => {
+            insightsText += `- **${sub.title || 'Detail'}:** ${sub.text}\n`;
+          });
+          insightsText += '\n';
+        }
+      });
+    }
+
+    // Action items with owners
+    if (insight.actionItems && insight.actionItems.length > 0) {
+      insightsText += "## Action Items\n\n";
+      insight.actionItems.forEach((item, index) => {
+        const text = item.text || item.description || item.content;
+        const title = item.title ? `**${item.title}:** ` : '';
+        const owner = item.ownerDisplayName ? ` (Owner: ${item.ownerDisplayName})` : '';
+        insightsText += `${index + 1}. ${title}${text}${owner}\n`;
+      });
+      insightsText += '\n';
+    }
+
+    // Mentions (viewpoint-specific: who was mentioned and in what context)
+    if (insight.viewpoint && insight.viewpoint.mentionEvents && insight.viewpoint.mentionEvents.length > 0) {
+      insightsText += "## Mentions\n\n";
+      insight.viewpoint.mentionEvents.forEach((mention) => {
+        insightsText += `- ${mention.text || mention.description || mention.content || JSON.stringify(mention)}\n`;
+      });
+      insightsText += '\n';
+    }
+
     return {
-      content: [{ 
-        type: "text", 
-        text: `# Meeting Insights\n\n${insightsText}` 
+      content: [{
+        type: "text",
+        text: `# Meeting AI Insights\n\n${insightsText}`
       }]
     };
   } catch (error) {
+    let suggestion = '';
+    if (error.message && error.message.includes('Forbidden')) {
+      suggestion = '\nThis API requires the OnlineMeetingAiInsight.Read.All scope and a Microsoft 365 Copilot licence. Please re-authenticate to pick up the new scope.';
+    }
     return {
-      content: [{ 
-        type: "text", 
-        text: `Unable to retrieve meeting insights. This might be because insights aren't available yet or the meeting didn't have AI insights enabled: ${error.message}` 
+      content: [{
+        type: "text",
+        text: `Unable to retrieve meeting insights: ${error.message}${suggestion}`
       }]
     };
   }

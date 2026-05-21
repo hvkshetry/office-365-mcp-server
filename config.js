@@ -38,6 +38,7 @@ module.exports = {
       'Chat.ReadWrite',
       'ChannelMessage.Read.All', 'ChannelMessage.Send',
       'OnlineMeetingTranscript.Read.All',
+      'OnlineMeetingAiInsight.Read.All',
       'OnlineMeetings.ReadWrite',
       'Tasks.ReadWrite',
       'Group.Read.All', 'Directory.Read.All',
