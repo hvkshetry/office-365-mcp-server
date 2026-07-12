@@ -220,10 +220,12 @@ function buildKQLQuery(params) {
   }
 
   if (params.from) {
-    kql.push(`from:${params.from}`);
+    const froms = Array.isArray(params.from) ? params.from : [params.from];
+    kql.push(froms.length === 1 ? `from:${froms[0]}` : `(${froms.map((f) => `from:${f}`).join(' OR ')})`);
   }
   if (params.to) {
-    kql.push(`to:${params.to}`);
+    const tos = Array.isArray(params.to) ? params.to : [params.to];
+    kql.push(tos.length === 1 ? `to:${tos[0]}` : `(${tos.map((t) => `to:${t}`).join(' OR ')})`);
   }
   if (params.subject && !isKQLFormat(params.query)) {
     kql.push(`subject:"${params.subject}"`);
@@ -438,14 +440,15 @@ async function searchUsingGraphSearch(accessToken, params) {
  * Search using $filter parameter (most reliable fallback)
  */
 async function searchUsingFilter(accessToken, params) {
+  // NOTE: from/to/hasAttachments/importance are intentionally NOT handled here. They are routed
+  // through the KQL $search path upstream (handleEmailSearch), because a Graph message $filter on
+  // those properties returns "The restriction or sort order is too complex for this operation"
+  // (and to/from fail the filter node outright). This function builds $filter only for text
+  // (contains), isRead, and date-range predicates.
   const {
     query,
-    from,
-    to,
     subject,
-    hasAttachments,
     isRead,
-    importance,
     startDate,
     endDate,
     endpoint,
@@ -454,32 +457,16 @@ async function searchUsingFilter(accessToken, params) {
 
   let filters = [];
 
-  if (query && query !== '' && query !== '*' && !from && !subject) {
+  if (query && query !== '' && query !== '*' && !subject) {
     filters.push(`contains(subject, '${query}')`);
-  }
-
-  if (from) {
-    filters.push(`from/emailAddress/address eq '${from}'`);
-  }
-
-  if (to) {
-    filters.push(`toRecipients/any(r: r/emailAddress/address eq '${to}')`);
   }
 
   if (subject) {
     filters.push(`contains(subject, '${subject}')`);
   }
 
-  if (hasAttachments !== undefined) {
-    filters.push(`hasAttachments eq ${hasAttachments ? 'true' : 'false'}`);
-  }
-
   if (isRead !== undefined) {
     filters.push(`isRead eq ${isRead ? 'true' : 'false'}`);
-  }
-
-  if (importance) {
-    filters.push(`importance eq '${importance}'`);
   }
 
   const dateField = 'receivedDateTime';

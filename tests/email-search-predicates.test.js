@@ -62,6 +62,16 @@ describe('email search predicate routing (Graph "too complex" 400 fix)', () => {
     expect(anyFilterIncludes(gets, "importance eq")).toBe(false);
   });
 
+  it('routes an array-valued to (mail schema) through $search as OR-joined recipients', async () => {
+    const { handleEmailSearch, callGraphAPI } = loadSearchWithMocks();
+    await handleEmailSearch({ to: ['a@example.com', 'b@example.com'] });
+
+    const gets = messageGetCalls(callGraphAPI);
+    expect(gets[0].queryParams.$search).toContain('to:a@example.com');
+    expect(gets[0].queryParams.$search).toContain('to:b@example.com');
+    expect(anyFilterIncludes(gets, 'toRecipients')).toBe(false);
+  });
+
   it('from + date range still uses $search (KQL), never a from $filter', async () => {
     const { handleEmailSearch, callGraphAPI } = loadSearchWithMocks();
     await handleEmailSearch({ from: 'nikita@circlecbg.com', startDate: '2026-06-01', endDate: '2026-07-31' });
