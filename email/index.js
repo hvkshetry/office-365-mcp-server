@@ -6,6 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const { ensureAuthenticated } = require('../auth');
+const { resolveSendToken } = require('../auth/sendas-fallback');
 const { callGraphAPI } = require('../utils/graph-api');
 const { safeTool } = require('../utils/errors');
 const { validateId } = require('../utils/validate');
@@ -102,17 +103,17 @@ async function handleEmail(args) {
         return cleanupAttachment(params);
       case 'send':
         console.error('[EMAIL] Sending email');
-        return await sendEmail(accessToken, params);
+        return await sendEmail(await resolveSendToken(accessToken, params), params);
       case 'reply':
         console.error('[EMAIL] Replying to email');
-        return await replyToEmail(accessToken, params);
+        return await replyToEmail(await resolveSendToken(accessToken, params), params);
       case 'draft':
         console.error('[EMAIL] Creating draft');
         return await createDraft(accessToken, params);
       case 'update_draft':
         return await updateDraft(accessToken, params);
       case 'send_draft':
-        return await sendDraft(accessToken, params);
+        return await sendDraft(await resolveSendToken(accessToken, params), params);
       case 'list_drafts':
         return await listDrafts(accessToken, params);
       default:
