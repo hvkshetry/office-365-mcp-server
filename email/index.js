@@ -785,6 +785,18 @@ async function createDraft(accessToken, params) {
 
 async function updateDraft(accessToken, params) {
   try {
+    // update_draft was the one addressing operation that never consulted the
+    // execution policy, which left a three-step hole: draft to an internal
+    // address (checked), update_draft to swap in an outsider (unchecked), then
+    // send_draft by id (recipients live on the draft in Exchange, so nothing
+    // downstream can see them). Inert unless a policy is configured.
+    const policyError = await enforceMailPolicy('update_draft', params);
+    if (policyError) {
+      return {
+        content: [{ type: "text", text: policyError }]
+      };
+    }
+
     const { draftId, mailbox, ...updateParams } = params;
 
     if (!draftId) {
