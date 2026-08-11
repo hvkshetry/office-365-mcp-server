@@ -6,6 +6,7 @@ const os = require('os');
 const https = require('https');
 require('dotenv').config();
 const config = require('./config');
+const secureStore = require('./auth/secure-store');
 
 // MCP Server Auth Helper for Office MCP
 // This server handles the OAuth2 redirect callback from Microsoft
@@ -302,11 +303,8 @@ function exchangeCodeForTokens(code) {
             // Add expires_at for easier expiration checking
             tokenResponse.expires_at = expiresAt;
             
-            // Save tokens to file with secure permissions (atomic write)
-            const tempFile = TOKEN_FILE + '.tmp';
-            fs.writeFileSync(tempFile, JSON.stringify(tokenResponse, null, 2), { mode: 0o600 });
-            fs.renameSync(tempFile, TOKEN_FILE);
-            try { fs.chmodSync(TOKEN_FILE, 0o600); } catch (e) { /* Windows may not support chmod */ }
+            // Save tokens (encrypted at rest on Windows via DPAPI / secure-store)
+            secureStore.writeTokens(tokenResponse);
             console.log(`Tokens saved securely to ${TOKEN_FILE}`);
             
             resolve(tokenResponse);

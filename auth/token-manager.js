@@ -1,9 +1,8 @@
 /**
  * Token management for Microsoft Graph API authentication
  */
-const fs = require('fs');
-const config = require('../config');
 const { refreshAccessToken, needsRefresh } = require('./auto-refresh');
+const secureStore = require('./secure-store');
 
 // Global variable to store tokens
 let cachedTokens = null;
@@ -14,44 +13,36 @@ let cachedTokens = null;
  */
 function loadTokenCache() {
   try {
-    const tokenPath = config.AUTH_CONFIG.tokenStorePath;
+    // Reads + transparently decrypts (Windows DPAPI) via secure-store.
+    const tokens = secureStore.readTokens();
 
-    if (!fs.existsSync(tokenPath)) {
-      console.error('[TOKEN-MANAGER] Token file not found');
+    if (!tokens) {
+      console.error('[TOKEN-MANAGER] Token file not found or unreadable');
       return null;
     }
 
-    const tokenData = fs.readFileSync(tokenPath, 'utf8');
+    // Safe logging - only confirm presence, never log content
+    console.error('[TOKEN-MANAGER] Token loaded - has access_token:', !!tokens.access_token);
+    console.error('[TOKEN-MANAGER] Token loaded - has refresh_token:', !!tokens.refresh_token);
 
-    try {
-      const tokens = JSON.parse(tokenData);
-
-      // Safe logging - only confirm presence, never log content
-      console.error('[TOKEN-MANAGER] Token loaded - has access_token:', !!tokens.access_token);
-      console.error('[TOKEN-MANAGER] Token loaded - has refresh_token:', !!tokens.refresh_token);
-
-      if (!tokens.access_token) {
-        console.error('[TOKEN-MANAGER] No access_token found in token file');
-        return null;
-      }
-
-      // Check token expiration
-      const now = Date.now();
-      const expiresAt = tokens.expires_at || 0;
-
-      if (now > expiresAt) {
-        console.error('[TOKEN-MANAGER] Token expired - will need refresh');
-      } else {
-        const expiresIn = Math.round((expiresAt - now) / 1000 / 60);
-        console.error(`[TOKEN-MANAGER] Token valid for ~${expiresIn} minutes`);
-      }
-
-      cachedTokens = tokens;
-      return tokens;
-    } catch (parseError) {
-      console.error('[TOKEN-MANAGER] Error parsing token file');
+    if (!tokens.access_token) {
+      console.error('[TOKEN-MANAGER] No access_token found in token file');
       return null;
     }
+
+    // Check token expiration
+    const now = Date.now();
+    const expiresAt = tokens.expires_at || 0;
+
+    if (now > expiresAt) {
+      console.error('[TOKEN-MANAGER] Token expired - will need refresh');
+    } else {
+      const expiresIn = Math.round((expiresAt - now) / 1000 / 60);
+      console.error(`[TOKEN-MANAGER] Token valid for ~${expiresIn} minutes`);
+    }
+
+    cachedTokens = tokens;
+    return tokens;
   } catch (error) {
     console.error('[TOKEN-MANAGER] Error loading tokens:', error.message);
     return null;
@@ -64,29 +55,13 @@ function loadTokenCache() {
  * @returns {boolean} - Whether the save was successful
  */
 function saveTokenCache(tokens) {
-  try {
-    const tokenPath = config.AUTH_CONFIG.tokenStorePath;
-    const tempPath = tokenPath + '.tmp';
-
-    // Atomic write: write to temp file then rename to avoid corruption
-    fs.writeFileSync(tempPath, JSON.stringify(tokens, null, 2), { mode: 0o600 });
-    fs.renameSync(tempPath, tokenPath);
-
-    // Also ensure correct permissions on final file (for pre-existing files)
-    try {
-      fs.chmodSync(tokenPath, 0o600);
-    } catch (chmodError) {
-      // Windows may not support chmod, that's OK
-    }
-
+  // Encrypts at rest on Windows (DPAPI) via secure-store; atomic write inside.
+  const ok = secureStore.writeTokens(tokens);
+  if (ok) {
     console.error('[TOKEN-MANAGER] Tokens saved securely');
-
     cachedTokens = tokens;
-    return true;
-  } catch (error) {
-    console.error('[TOKEN-MANAGER] Error saving tokens:', error.message);
-    return false;
   }
+  return ok;
 }
 
 /**

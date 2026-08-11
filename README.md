@@ -281,7 +281,8 @@ For Windows background operation:
 
 ## Security Considerations
 
-- **Secure Token Storage**: Tokens are stored with restricted file permissions (0o600) using atomic writes to prevent corruption
+- **Encrypted Token Storage (Windows)**: On Windows the token cache (`~/.office-mcp-tokens.json`) is encrypted at rest with the Windows Data Protection API (DPAPI, CurrentUser scope) via `auth/secure-store.js` before it is written. The on-disk ciphertext is bound to the current Windows user account on this machine, so it is useless if copied to another machine/user, synced to the cloud (OneDrive), or pulled from a backup. A legacy plaintext token file is transparently migrated to the encrypted format on first read. No native build dependency is required (DPAPI is invoked through PowerShell). On non-Windows platforms it falls back to restricted-permission (0o600) plaintext with atomic writes.
+- **At-rest protection only (threat model)**: DPAPI defends against file copy/sync/backup and other users or admins reading the file; it does **not** stop malicious code already running as the same Windows user (such code can ask DPAPI to decrypt, as the server does). For device-bound (TPM) refresh tokens that never touch disk, migrate to MSAL + the Windows WAM broker.
 - **No Credential Logging**: Token content is never logged; only boolean presence checks are used
 - **Sensitive Data Redaction**: Email bodies, recipients, and search queries are not logged; API URLs with query params are gated behind DEBUG_VERBOSE
 - **Environment Variables**: Never commit `.env` files

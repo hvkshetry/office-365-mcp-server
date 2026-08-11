@@ -3,8 +3,8 @@
  * Handles refreshing access tokens using refresh tokens without user interaction
  */
 const https = require('https');
-const fs = require('fs');
 const config = require('../config');
+const secureStore = require('./secure-store');
 
 /**
  * Refreshes the access token using the stored refresh token
@@ -14,13 +14,11 @@ async function refreshAccessToken() {
   console.error('[AUTO-REFRESH] Starting token refresh process');
   
   try {
-    // Load existing tokens
-    const tokenPath = config.AUTH_CONFIG.tokenStorePath;
-    if (!fs.existsSync(tokenPath)) {
+    // Load existing tokens (transparently decrypted on Windows via secure-store)
+    const tokens = secureStore.readTokens();
+    if (!tokens) {
       throw new Error('Token file not found. Initial authentication required.');
     }
-    
-    const tokens = JSON.parse(fs.readFileSync(tokenPath, 'utf8'));
     
     if (!tokens.refresh_token) {
       throw new Error('No refresh token available. Re-authentication required.');
@@ -83,11 +81,8 @@ async function refreshAccessToken() {
                 newTokens.refresh_token = tokens.refresh_token;
               }
 
-              // Save refreshed tokens with secure permissions (atomic write)
-              const tempPath = tokenPath + '.tmp';
-              fs.writeFileSync(tempPath, JSON.stringify(newTokens, null, 2), { mode: 0o600 });
-              fs.renameSync(tempPath, tokenPath);
-              try { fs.chmodSync(tokenPath, 0o600); } catch (e) { /* Windows may not support chmod */ }
+              // Persist refreshed tokens (encrypted at rest on Windows via DPAPI)
+              secureStore.writeTokens(newTokens);
 
               console.error('[AUTO-REFRESH] Token refresh successful');
               console.error(`[AUTO-REFRESH] New token expires at: ${new Date(expiresAt).toLocaleString()}`);
@@ -150,13 +145,10 @@ function needsRefresh(tokens, bufferMinutes = 5) {
  * @returns {Promise<string>} - Valid access token
  */
 async function getValidAccessToken() {
-  const tokenPath = config.AUTH_CONFIG.tokenStorePath;
-  
-  if (!fs.existsSync(tokenPath)) {
+  let tokens = secureStore.readTokens();
+  if (!tokens) {
     throw new Error('No tokens found. Initial authentication required.');
   }
-  
-  let tokens = JSON.parse(fs.readFileSync(tokenPath, 'utf8'));
   
   if (needsRefresh(tokens)) {
     console.error('[AUTO-REFRESH] Token needs refresh, initiating refresh');
