@@ -926,6 +926,24 @@ async function getMeetingParticipants(accessToken, params) {
 async function getMeetingInsights(accessToken, params) {
   const { meetingId } = params;
 
+  // Fail fast when the deployment has not opted in. Without
+  // OnlineMeetingAiInsight.Read.All the token cannot carry the permission, so the
+  // Graph call below would return a bare 403 that reads like a transient auth fault.
+  // Say plainly that this is a licensing/configuration boundary instead.
+  if (!config.copilotInsightsEnabled) {
+    return {
+      content: [{
+        type: "text",
+        text: "Meeting AI insights are not enabled on this deployment. They require a "
+          + "Microsoft 365 Copilot licence and the OnlineMeetingAiInsight.Read.All scope, "
+          + "which needs admin consent. To enable: grant that permission on the app "
+          + "registration, set OFFICE_ENABLE_COPILOT_INSIGHTS=true, and re-authenticate. "
+          + "The scope is opt-in because it is also sent on every token refresh, so "
+          + "requesting it without consent can break mail and calendar access."
+      }]
+    };
+  }
+
   if (!meetingId) {
     return {
       content: [{
