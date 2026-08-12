@@ -588,33 +588,64 @@ async function searchFiles(accessToken, params) {
     ? `/me/drive/search(q='${encodeURIComponent(searchQuery)}')`
     : `/search/query`;
 
-  const body = effectiveScope !== 'me' ? {
-    requests: [{
-      entityTypes: ['driveItem'],
-      query: {
-        queryString: searchQuery
-      },
-      size: maxResults
-    }]
-  } : null;
+  // Graph caps a single /search/query request well below what callers ask for,
+  // and returns the first hitsContainer only. Issuing one request and reporting
+  // its length as the answer silently truncated: a folder of 51 PDFs came back
+  // as 20 with nothing to indicate the other 31 existed. Page until the caller's
+  // maxResults is satisfied or Graph says there is no more.
+  const PAGE_SIZE = 25;
+  const items = [];
+  let reportedTotal = null;
+  let moreAvailable = false;
 
-  const response = await callGraphAPI(
-    accessToken,
-    effectiveScope === 'me' ? 'GET' : 'POST',
-    endpoint,
-    body,
-    effectiveScope === 'me' ? { $top: maxResults } : {}
-  );
+  if (effectiveScope === 'me') {
+    // /me/drive/search pages with @odata.nextLink, an absolute URL.
+    let next = null;
+    do {
+      const response = next
+        ? await callGraphAPI(accessToken, 'GET', next)
+        : await callGraphAPI(accessToken, 'GET', endpoint, null, { $top: Math.min(PAGE_SIZE, maxResults) });
+      const batch = response.value || [];
+      items.push(...batch);
+      next = response['@odata.nextLink'] || null;
+      if (batch.length === 0) break;
+    } while (next && items.length < maxResults);
+    moreAvailable = Boolean(next) && items.length >= maxResults;
+  } else {
+    let from = 0;
+    for (;;) {
+      const response = await callGraphAPI(accessToken, 'POST', endpoint, {
+        requests: [{
+          entityTypes: ['driveItem'],
+          query: { queryString: searchQuery },
+          from,
+          size: Math.min(PAGE_SIZE, maxResults - items.length)
+        }]
+      }, {});
 
-  const items = effectiveScope === 'me' ? response.value : response.value[0].hitsContainers[0].hits;
-  
+      const container = response.value?.[0]?.hitsContainers?.[0];
+      const batch = container?.hits || [];
+      if (reportedTotal === null && typeof container?.total === 'number') {
+        reportedTotal = container.total;
+      }
+      moreAvailable = Boolean(container?.moreResultsAvailable);
+      items.push(...batch);
+
+      if (batch.length === 0 || !moreAvailable || items.length >= maxResults) break;
+      from += batch.length;
+    }
+  }
+
   if (!items || items.length === 0) {
     return {
       content: [{ type: "text", text: "No files found matching your search." }]
     };
   }
-  
-  const results = items.map((item, index) => {
+
+  const shown = items.slice(0, maxResults);
+  const truncated = moreAvailable || (reportedTotal !== null && reportedTotal > shown.length);
+
+  const results = shown.map((item, index) => {
     const file = effectiveScope === 'me' ? item : item.resource;
     const driveInfo = file.parentReference?.driveId
       ? `\n   DriveID: ${file.parentReference.driveId}`
@@ -625,11 +656,20 @@ async function searchFiles(accessToken, params) {
    Modified: ${new Date(file.lastModifiedDateTime).toLocaleString()}
    ID: ${file.id}${driveInfo}`;
   }).join('\n\n');
-  
+
+  // State the total when Graph gives one, and never let a truncated list read
+  // as the complete set -- that is what made 51 PDFs look like 20.
+  const header = reportedTotal !== null && reportedTotal > shown.length
+    ? `Showing ${shown.length} of ${reportedTotal} matching files`
+    : `Found ${shown.length} files`;
+  const note = truncated
+    ? `\n\nTRUNCATED: more matches exist than are shown. Raise maxResults (currently ${maxResults}) or narrow the query.`
+    : '';
+
   return {
-    content: [{ 
-      type: "text", 
-      text: `Found ${items.length} files:\n\n${results}` 
+    content: [{
+      type: "text",
+      text: `${header}:\n\n${results}${note}`
     }]
   };
 }
@@ -945,10 +985,48 @@ const filesTools = [
           ? `${config.SHAREPOINT_SYMLINK_PATH}/${pathComponents.join('/')}`
           : config.SHAREPOINT_SYMLINK_PATH;
         
+        // Every path above is a guess: the site-name transform is a pile of
+        // regex heuristics and nothing has looked at the filesystem. Reporting
+        // "mapped successfully" for a path that does not exist sends the caller
+        // to read a file that was never there, and the read failure then reads
+        // as "the document is missing" rather than "this host has no sync".
+        const pathExists = (p) => {
+          try {
+            return fs.existsSync(p);
+          } catch {
+            return false;
+          }
+        };
+
+        const candidates = [
+          { label: 'Windows path', value: localPath },
+          { label: 'WSL/Linux path', value: wslPath },
+          { label: 'Symlink path (for subagent)', value: symlinkPath }
+        ].map(c => ({ ...c, exists: pathExists(c.value) }));
+
+        const verified = candidates.filter(c => c.exists);
+        const rootPresent = pathExists(baseSyncPath) || pathExists(config.SHAREPOINT_SYMLINK_PATH);
+        const render = candidates
+          .map(c => `${c.exists ? '[verified]' : '[not found]'} ${c.label}:\n${c.value}`)
+          .join('\n\n');
+
+        if (verified.length > 0) {
+          return {
+            content: [{
+              type: "text",
+              text: `SharePoint URL mapped to an existing local path:\n\nSharePoint: ${webUrl}\n\n${render}`
+            }]
+          };
+        }
+
+        const cause = rootPresent
+          ? 'A sync root exists, but nothing was found at the mapped location. The site-name transform is heuristic and is the likely culprit.'
+          : `No local sync root exists on this host (checked ${baseSyncPath} and ${config.SHAREPOINT_SYMLINK_PATH}). These files are not synced to this machine.`;
+
         return {
           content: [{
             type: "text",
-            text: `SharePoint URL mapped successfully:\n\nSharePoint: ${webUrl}\n\nWindows path:\n${localPath}\n\nWSL/Linux path:\n${wslPath}\n\nSymlink path (for subagent):\n${symlinkPath}`
+            text: `SharePoint URL could NOT be mapped to a local path.\n\n${cause}\n\nDo not read the paths below - none of them exist. Use the Graph API instead: files { operation: "search" } to locate the item, then files { operation: "download", driveId, fileId } to fetch its content to a local temp file.\n\nSharePoint: ${webUrl}\n\nUnverified candidates:\n\n${render}`
           }]
         };
       } catch (error) {
