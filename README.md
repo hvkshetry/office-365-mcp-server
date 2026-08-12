@@ -73,7 +73,7 @@ The server uses a consolidated tool design where each Microsoft 365 domain is ex
 | `teams_meeting` | Teams meetings | `create`, `update`, `cancel`, `find`, `list_transcripts`, `get_transcript`, `get_recordings` |
 | `teams_channel` | Teams channels | `list`, `create`, `get`, `update`, `delete`, `send_message`, `list_messages`, `list_members` |
 | `teams_chat` | Teams chat | `list`, `create`, `get`, `send_message`, `list_messages`, `list_members` |
-| `files` | OneDrive/SharePoint | `list`, `get`, `search`, `upload`, `download`, `create_folder`, `delete`, `move`, `copy`, `share` — all operations support cross-drive via `driveId` |
+| `files` | OneDrive/SharePoint | `list`, `get`, `search`, `upload`, `download`, `cleanup_download`, `create_folder`, `delete`, `move`, `copy`, `share` — all operations support cross-drive via `driveId` |
 | `search` | Unified search | Keyword-based search across mail, files, events — returns `ID` and `DriveID` for actionable results |
 | `contacts` | Outlook contacts | `list`, `get`, `create`, `update`, `delete`, `search`, `list_folders` |
 | `planner` | Microsoft Planner | Entity+operation: `plan.list`, `task.create`, `bucket.get_tasks`, `user.lookup`, etc. |
@@ -167,6 +167,7 @@ OFFICE_REDIRECT_URI=http://localhost:3000/auth/callback
 SHAREPOINT_SYNC_PATH=/path/to/your/sharepoint/sync
 ONEDRIVE_SYNC_PATH=/path/to/your/onedrive/sync
 TEMP_ATTACHMENTS_PATH=/path/to/temp/attachments
+TEMP_FILES_PATH=/path/to/temp/files
 SHAREPOINT_SYMLINK_PATH=/path/to/sharepoint/symlink
 
 # Server settings
@@ -175,6 +176,8 @@ TRANSPORT_TYPE=stdio  # or 'http' for SSE headless mode
 HTTP_PORT=3333
 HTTP_HOST=127.0.0.1
 ```
+
+`files.download` saves binary OneDrive/SharePoint files under `TEMP_FILES_PATH` on the host running this MCP server, matching the email attachment download pattern. Local agents using a local MCP server receive local paths such as `/home/hersh/temp/files/...`; OCI agents using the OCI MCP server receive OCI paths such as `/home/ubuntu/temp/files/...`. Use `files { operation: "cleanup_download", path: "..." }` after processing.
 
 ## Claude Desktop Configuration
 
