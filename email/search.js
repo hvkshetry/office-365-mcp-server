@@ -34,6 +34,10 @@ async function handleEmailSearch(args) {
 
   // Handle empty query string - skip $search and use $filter directly
   const isEmptyQuery = !query || query === "" || (typeof query === 'string' && query.trim() === "");
+  // from/to/hasAttachments/importance cannot be expressed in a Graph message $filter without a
+  // "restriction or sort order is too complex" 400 (from/to also fail the filter node itself);
+  // they must ride the KQL $search path, which Graph returns already date-sorted.
+  const usesKqlOnly = !!(from || to || hasAttachments !== undefined || importance);
 
   try {
     const accessToken = await ensureAuthenticated();
@@ -63,17 +67,24 @@ async function handleEmailSearch(args) {
       searchEndpoint = `${config.getMailboxPrefix(mailbox)}/mailFolders/${folderToSearch}/messages`;
     }
 
-    // If query is empty, go directly to $filter (for filtering by status, dates, etc.)
+    // If query is empty, route by predicate type: from/to/hasAttachments/importance go through
+    // $search (Graph rejects them in $filter); pure date/status stay on the $filter path.
     if (isEmptyQuery) {
+      if (usesKqlOnly) {
+        const kqlOnly = buildKQLQuery({ query: '', from, to, subject, hasAttachments, isRead, importance, startDate, endDate });
+        console.error(`Empty query with $search-only predicate(s), using $search: ${kqlOnly}`);
+        return await searchUsingGraphSearch(accessToken, {
+          query: kqlOnly,
+          endpoint: searchEndpoint,
+          maxResults,
+          allowEmpty: true
+        });
+      }
       console.error('Empty query detected, using $filter directly');
       return await searchUsingFilter(accessToken, {
         query: '',
-        from,
-        to,
         subject,
-        hasAttachments,
         isRead,
-        importance,
         startDate,
         endDate,
         endpoint: searchEndpoint,
@@ -97,8 +108,9 @@ async function handleEmailSearch(args) {
     console.error(`Unified search - KQL Query: ${kqlQuery}`);
     console.error(`Search endpoint: ${searchEndpoint}`);
 
-    // Early exit to $filter for date-scoped searches ONLY if not KQL format
-    if ((startDate || endDate) && !isKQLFormat(query || '')) {
+    // Early exit to $filter for date-scoped searches ONLY if not KQL format and no
+    // $search-only predicate is present (those must not touch $filter — see usesKqlOnly).
+    if ((startDate || endDate) && !isKQLFormat(query || '') && !usesKqlOnly) {
       console.error('Date filters detected with non-KQL query, using $filter directly');
       return await searchUsingFilter(accessToken, {
         query,
@@ -139,10 +151,17 @@ async function handleEmailSearch(args) {
       return await searchUsingGraphSearch(accessToken, {
         query: kqlQuery,
         endpoint: searchEndpoint,
-        maxResults
+        maxResults,
+        allowEmpty: usesKqlOnly
       });
     } catch (error) {
       console.error('Graph $search failed, falling back to $filter:', error.message);
+
+      // from/to/hasAttachments/importance cannot fall back to $filter (Graph 400); a $search
+      // error here means no usable result, so return empty rather than a mis-broadened $filter.
+      if (usesKqlOnly) {
+        return { content: [{ type: "text", text: "No emails found matching your search." }] };
+      }
 
       // Tier 3: Fall back to $filter
       if (isKQLFormat(query || '')) {
@@ -201,10 +220,12 @@ function buildKQLQuery(params) {
   }
 
   if (params.from) {
-    kql.push(`from:${params.from}`);
+    const froms = Array.isArray(params.from) ? params.from : [params.from];
+    kql.push(froms.length === 1 ? `from:${froms[0]}` : `(${froms.map((f) => `from:${f}`).join(' OR ')})`);
   }
   if (params.to) {
-    kql.push(`to:${params.to}`);
+    const tos = Array.isArray(params.to) ? params.to : [params.to];
+    kql.push(tos.length === 1 ? `to:${tos[0]}` : `(${tos.map((t) => `to:${t}`).join(' OR ')})`);
   }
   if (params.subject && !isKQLFormat(params.query)) {
     kql.push(`subject:"${params.subject}"`);
@@ -369,7 +390,7 @@ async function searchUsingMicrosoftSearchAPI(accessToken, params) {
  * Search using Graph API $search parameter
  */
 async function searchUsingGraphSearch(accessToken, params) {
-  const { query, endpoint, maxResults, mailbox } = params;
+  const { query, endpoint, maxResults, allowEmpty = false, mailbox } = params;
 
   const queryParams = {
     $search: `"${query}"`,
@@ -386,6 +407,14 @@ async function searchUsingGraphSearch(accessToken, params) {
   );
 
   if (!response.value || response.value.length === 0) {
+    if (allowEmpty) {
+      // Predicates like from:/to:/hasattachment:/importance: are only expressible via $search
+      // (a $filter on them triggers a Graph "too complex" 400), so there is no $filter fallback
+      // to attempt — a genuine empty result is the answer.
+      return {
+        content: [{ type: "text", text: "No emails found matching your search." }]
+      };
+    }
     console.error('Graph $search returned 0 results, falling back to $filter');
     throw new Error('No results from $search, trigger fallback');
   }
@@ -411,14 +440,15 @@ async function searchUsingGraphSearch(accessToken, params) {
  * Search using $filter parameter (most reliable fallback)
  */
 async function searchUsingFilter(accessToken, params) {
+  // NOTE: from/to/hasAttachments/importance are intentionally NOT handled here. They are routed
+  // through the KQL $search path upstream (handleEmailSearch), because a Graph message $filter on
+  // those properties returns "The restriction or sort order is too complex for this operation"
+  // (and to/from fail the filter node outright). This function builds $filter only for text
+  // (contains), isRead, and date-range predicates.
   const {
     query,
-    from,
-    to,
     subject,
-    hasAttachments,
     isRead,
-    importance,
     startDate,
     endDate,
     endpoint,
@@ -427,32 +457,16 @@ async function searchUsingFilter(accessToken, params) {
 
   let filters = [];
 
-  if (query && query !== '' && query !== '*' && !from && !subject) {
+  if (query && query !== '' && query !== '*' && !subject) {
     filters.push(`contains(subject, '${query}')`);
-  }
-
-  if (from) {
-    filters.push(`from/emailAddress/address eq '${from}'`);
-  }
-
-  if (to) {
-    filters.push(`toRecipients/any(r: r/emailAddress/address eq '${to}')`);
   }
 
   if (subject) {
     filters.push(`contains(subject, '${subject}')`);
   }
 
-  if (hasAttachments !== undefined) {
-    filters.push(`hasAttachments eq ${hasAttachments ? 'true' : 'false'}`);
-  }
-
   if (isRead !== undefined) {
     filters.push(`isRead eq ${isRead ? 'true' : 'false'}`);
-  }
-
-  if (importance) {
-    filters.push(`importance eq '${importance}'`);
   }
 
   const dateField = 'receivedDateTime';

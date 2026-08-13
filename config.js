@@ -20,7 +20,13 @@ module.exports = {
   
   // Test mode setting
   USE_TEST_MODE: process.env.USE_TEST_MODE === 'true',
-  
+
+  // Copilot meeting AI insights (teams_meeting get_insights). Opt-in: see the scope
+  // note in AUTH_CONFIG.scopes. Read by the tool so an ungated deployment fails fast
+  // with a clear reason instead of a bare 403 from Graph.
+  copilotInsightsEnabled: process.env.OFFICE_ENABLE_COPILOT_INSIGHTS === 'true',
+
+
   // Authentication configuration
   AUTH_CONFIG: {
     clientId: process.env.OFFICE_CLIENT_ID || '',
@@ -42,7 +48,18 @@ module.exports = {
       'Tasks.ReadWrite',
       'Group.Read.All', 'Directory.Read.All',
       'Presence.ReadWrite',
-      'Sites.Read.All'
+      'Sites.Read.All',
+      // Copilot meeting AI insights (teams_meeting get_insights) is OPT-IN, because
+      // OnlineMeetingAiInsight.Read.All requires admin consent AND a Microsoft 365
+      // Copilot licence. This array is joined into the REFRESH request as well as the
+      // initial authorization (auth/auto-refresh.js), so listing a scope the tenant has
+      // not consented to can fail the refresh (AADSTS65001) and take down mail and
+      // calendar for every unattended agent -- not just insights. A deployment without
+      // Copilot must not pay that risk for a capability it cannot use.
+      // Enable with OFFICE_ENABLE_COPILOT_INSIGHTS=true, then re-authenticate.
+      ...(process.env.OFFICE_ENABLE_COPILOT_INSIGHTS === 'true'
+        ? ['OnlineMeetingAiInsight.Read.All']
+        : [])
     ],
     tokenStorePath: path.join(homeDir, '.office-mcp-tokens.json'),
     authServerUrl: 'http://localhost:3000'
