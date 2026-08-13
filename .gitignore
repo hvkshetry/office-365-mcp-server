@@ -71,4 +71,4 @@ add_mailbox_to_schemas.py
 .npm
 .yarn-integrity
 yarn.lock
-package-lock.json
+package-lock.json.codex/

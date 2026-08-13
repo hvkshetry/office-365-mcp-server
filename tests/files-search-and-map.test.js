@@ -144,3 +144,24 @@ describe('files_map_sharepoint_path existence checking (#36)', () => {
     }
   });
 });
+
+describe('files tool schema (#35)', () => {
+  const { filesTools } = require('../files');
+
+  test('rejects unknown properties instead of silently ignoring them', () => {
+    const schema = filesTools.find(t => t.name === 'files').inputSchema;
+    expect(schema.additionalProperties).toBe(false);
+  });
+
+  test('still accepts the parameters the operations actually take', () => {
+    // The guard is only safe if the real parameter names are all declared --
+    // otherwise it converts a silent wrong answer into a hard failure on valid
+    // calls, which is a different bug, not a fix.
+    const schema = filesTools.find(t => t.name === 'files').inputSchema;
+    for (const key of ['operation', 'driveId', 'folderId', 'fileId', 'path',
+                       'query', 'searchScope', 'fileTypes', 'maxResults',
+                       'siteId', 'destinationId', 'newName', 'name']) {
+      expect(schema.properties).toHaveProperty(key);
+    }
+  });
+});

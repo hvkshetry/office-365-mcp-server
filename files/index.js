@@ -863,6 +863,13 @@ const filesTools = [
         // General parameters
         maxResults: { type: "number", description: "Maximum number of results" }
       },
+      // An unknown property used to be accepted and ignored. Passing `itemId`
+      // where `folderId` was meant therefore did not fail -- the list fell back
+      // to the drive root and returned a plausible listing of the wrong folder,
+      // which reads as "that folder is empty" or "the file is not there". A
+      // caller cannot distinguish that from a real answer, and it is what sent
+      // the original #35 investigation after a tool bug that did not exist.
+      additionalProperties: false,
       required: ["operation"]
     },
     handler: safeTool('files', handleFiles)
