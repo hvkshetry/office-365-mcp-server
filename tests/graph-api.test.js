@@ -104,3 +104,52 @@ describe('Graph API helper behavior', () => {
     });
   });
 });
+
+describe('mislabelled binary downloads', () => {
+  beforeEach(() => {
+    // clearAllMocks only. resetModules() tears down the https mock wiring that
+    // installHttpsResponses depends on, and the failure surfaces as an opaque
+    // "Cannot read properties of undefined (reading 'on')".
+    jest.clearAllMocks();
+  });
+
+  it('returns a Buffer when Content-Type lies and says text/plain', async () => {
+    // SharePoint's pre-authenticated download host labels .xlsx as text/plain.
+    // Decoding that as UTF-8 replaces every invalid byte with U+FFFD, which is
+    // irreversible -- observed on a real workbook, where the MCP path produced
+    // mangled text and the same URL fetched directly produced a valid PK zip.
+    const XLSX = Buffer.concat([
+      Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+      Buffer.from([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
+    ]);
+    const requests = [];
+    installHttpsResponses([mockResponse(200, { 'content-type': 'text/plain' }, [XLSX])], requests);
+
+    const { callGraphAPI } = require('../utils/graph-api');
+    const result = await callGraphAPI('tok', 'GET', '/drives/d/items/i/content');
+
+    expect(Buffer.isBuffer(result)).toBe(true);
+    expect(result).toEqual(XLSX);
+  });
+
+  it('still returns genuine text/plain as a string', () => {
+    // The guard must not turn every text response into a Buffer.
+    const { looksBinary } = require('../utils/graph-api');
+    if (typeof looksBinary === 'function') {
+      expect(looksBinary(Buffer.from('WEBVTT\n\n00:00.000 --> 00:01.000\nhello\n'))).toBe(false);
+      expect(looksBinary(Buffer.from([0x50, 0x4b, 0x03, 0x04]))).toBe(true);
+    }
+  });
+
+  it('does not misread a plain-text transcript as binary', async () => {
+    const VTT = Buffer.from('WEBVTT\n\n00:00.000 --> 00:02.000\nSpeaker: hello\n');
+    const requests = [];
+    installHttpsResponses([mockResponse(200, { 'content-type': 'text/vtt' }, [VTT])], requests);
+
+    const { callGraphAPI } = require('../utils/graph-api');
+    const result = await callGraphAPI('tok', 'GET', '/me/onlineMeetings/x/transcripts/y/content');
+
+    expect(typeof result).toBe('string');
+    expect(result).toContain('WEBVTT');
+  });
+});

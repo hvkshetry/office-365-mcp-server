@@ -81,6 +81,29 @@ function normalizeGraphError(statusCode, parsedError, rawBody, responseHeaders =
   };
 }
 
+const BINARY_MAGICS = [
+  Buffer.from([0x50, 0x4b, 0x03, 0x04]),        // zip: xlsx/docx/pptx/odf/jar
+  Buffer.from('%PDF'),                          // pdf
+  Buffer.from([0xd0, 0xcf, 0x11, 0xe0]),        // legacy OLE: xls/doc/ppt/msg
+  Buffer.from([0x89, 0x50, 0x4e, 0x47]),        // png
+  Buffer.from([0xff, 0xd8, 0xff]),              // jpeg
+  Buffer.from([0x1f, 0x8b]),                    // gzip
+];
+
+/**
+ * True when a body is binary regardless of what Content-Type claimed.
+ * Checks known container magics first, then scans for a NUL byte, which no
+ * UTF-8 text document contains.
+ */
+function looksBinary(buf) {
+  for (const magic of BINARY_MAGICS) {
+    if (buf.length >= magic.length && buf.subarray(0, magic.length).equals(magic)) {
+      return true;
+    }
+  }
+  return buf.subarray(0, 8192).includes(0x00);
+}
+
 function createGraphAPIError(statusCode, responseData, parsedError, responseHeaders = {}) {
   const graphError = normalizeGraphError(statusCode, parsedError, responseData, responseHeaders);
   const errorMessage = graphError.message || responseData;
@@ -282,7 +305,7 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
                                responseContentType.includes('csv') ||
                                responseContentType.includes('javascript') ||
                                responseContentType.includes('x-www-form-urlencoded');
-        const isBinaryResponse = !isTextResponse;
+        let isBinaryResponse = !isTextResponse;
 
         // Collect response data - use array of buffers for binary, string for text
         const chunks = [];
@@ -296,6 +319,26 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
           // path regardless of classification: callers test `!response`, and an empty
           // Buffer is truthy where the empty string they used to get is falsy.
           const rawBody = Buffer.concat(chunks);
+
+          // Content-Type is a claim, not a fact. SharePoint's pre-authenticated
+          // download host labels an .xlsx `text/plain`, which passes the
+          // startsWith('text/') test above and gets decoded as UTF-8 -- every
+          // invalid byte becomes U+FFFD, irreversibly. Observed on the South
+          // Burlington Basis of Design workbook: the MCP path returned mangled
+          // text while the same URL fetched directly returned a valid PK zip.
+          //
+          // So sniff before trusting the label. A NUL byte in the first 8 KB, or
+          // a known container magic, means binary whatever the header says.
+          // Misclassifying text as binary costs the caller nothing (a Buffer
+          // instead of a string); the reverse destroys the file.
+          if (!isBinaryResponse && rawBody.length > 0 && looksBinary(rawBody)) {
+            console.error(
+              `[GRAPH-API] Content-Type says ${responseContentType || 'unset'} but the ` +
+              `body is binary; returning a Buffer rather than corrupting it.`
+            );
+            isBinaryResponse = true;
+          }
+
           const responseData = (isBinaryResponse && rawBody.length > 0)
             ? rawBody
             : rawBody.toString('utf8');
