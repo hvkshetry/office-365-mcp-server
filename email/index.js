@@ -6,6 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const { ensureAuthenticated } = require('../auth');
+const { resolveSendToken } = require('../auth/sendas-fallback');
 const { callGraphAPI } = require('../utils/graph-api');
 const { safeTool } = require('../utils/errors');
 const { validateId } = require('../utils/validate');
@@ -299,17 +300,17 @@ async function handleEmail(args) {
         return cleanupAttachment(params);
       case 'send':
         console.error('[EMAIL] Sending email');
-        return await sendEmail(accessToken, params);
+        return await sendEmail(await resolveSendToken(accessToken, params), params);
       case 'reply':
         console.error('[EMAIL] Replying to email');
-        return await replyToEmail(accessToken, params);
+        return await replyToEmail(await resolveSendToken(accessToken, params), params);
       case 'draft':
         console.error('[EMAIL] Creating draft');
         return await createDraft(accessToken, params);
       case 'update_draft':
         return await updateDraft(accessToken, params);
       case 'send_draft':
-        return await sendDraft(accessToken, params);
+        return await sendDraft(await resolveSendToken(accessToken, params), params);
       case 'list_drafts':
         return await listDrafts(accessToken, params);
       default:
@@ -1005,6 +1006,18 @@ async function createDraft(accessToken, params) {
 
 async function updateDraft(accessToken, params) {
   try {
+    // update_draft was the one addressing operation that never consulted the
+    // execution policy, which left a three-step hole: draft to an internal
+    // address (checked), update_draft to swap in an outsider (unchecked), then
+    // send_draft by id (recipients live on the draft in Exchange, so nothing
+    // downstream can see them). Inert unless a policy is configured.
+    const policyError = await enforceMailPolicy('update_draft', params);
+    if (policyError) {
+      return {
+        content: [{ type: "text", text: policyError }]
+      };
+    }
+
     const { draftId, mailbox, ...updateParams } = params;
 
     if (!draftId) {

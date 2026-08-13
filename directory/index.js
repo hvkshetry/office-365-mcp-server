@@ -155,10 +155,13 @@ async function handleDirectory(args) {
           return { content: [{ type: "text", text: "Missing required parameter: query" }] };
         }
 
+        // Escape single quotes for OData (e.g. names like "David O'Keefe").
+        // An unescaped apostrophe terminates the filter string and yields a 400.
+        const escapedQuery = String(params.query).replace(/'/g, "''");
         const queryParams = {
           $top: params.maxResults || 25,
           $select: 'id,displayName,mail,userPrincipalName,jobTitle,department',
-          $filter: `startswith(displayName, '${params.query}') or startswith(mail, '${params.query}') or startswith(userPrincipalName, '${params.query}')`
+          $filter: `startswith(displayName, '${escapedQuery}') or startswith(mail, '${escapedQuery}') or startswith(userPrincipalName, '${escapedQuery}')`
         };
 
         const response = await callGraphAPI(accessToken, 'GET', 'users', null, queryParams);

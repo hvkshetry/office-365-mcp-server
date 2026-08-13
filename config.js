@@ -105,6 +105,7 @@ module.exports = {
   SHAREPOINT_SYNC_PATH: process.env.SHAREPOINT_SYNC_PATH || path.join(homeDir, 'SharePoint'),
   ONEDRIVE_SYNC_PATH: process.env.ONEDRIVE_SYNC_PATH || path.join(homeDir, 'OneDrive'),
   TEMP_ATTACHMENTS_PATH: process.env.TEMP_ATTACHMENTS_PATH || path.join(homeDir, 'temp', 'email-attachments'),
+  TEMP_FILES_PATH: process.env.TEMP_FILES_PATH || path.join(homeDir, 'temp', 'files'),
   SHAREPOINT_SYMLINK_PATH: process.env.SHAREPOINT_SYMLINK_PATH || path.join(homeDir, 'temp', 'sharepoint'),
 
   // Timezone configuration — all calendar/todo operations use Eastern Time

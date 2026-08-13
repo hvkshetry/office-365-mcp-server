@@ -8,14 +8,14 @@ const config = require('../config');
 
 /**
  * Refreshes the access token using the stored refresh token
+ * @param {string} [tokenPath] - Token file to refresh (defaults to the primary store)
  * @returns {Promise<object>} - New token data including access_token and refresh_token
  */
-async function refreshAccessToken() {
+async function refreshAccessToken(tokenPath = config.AUTH_CONFIG.tokenStorePath) {
   console.error('[AUTO-REFRESH] Starting token refresh process');
-  
+
   try {
     // Load existing tokens
-    const tokenPath = config.AUTH_CONFIG.tokenStorePath;
     if (!fs.existsSync(tokenPath)) {
       throw new Error('Token file not found. Initial authentication required.');
     }

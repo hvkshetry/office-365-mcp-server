@@ -99,74 +99,63 @@ async function handleCalendar(args) {
 
 async function listCalendarEvents(accessToken, params) {
   const { startDateTime, endDateTime, maxResults = 10 } = params;
-  
+
   console.error(`Calendar list request with startDateTime: ${startDateTime}, endDateTime: ${endDateTime}`);
-  
-  const queryParams = {
-    $select: config.CALENDAR_SELECT_FIELDS,
-    $orderby: 'start/dateTime',
-    $top: maxResults
-  };
-  
-  // Add date filter if provided
-  if (startDateTime || endDateTime) {
-    const filters = [];
-    if (startDateTime) {
-      // Only append Z if no timezone indicator already present
-      const formattedStartDateTime = hasTzIndicator(startDateTime)
-        ? startDateTime
-        : `${startDateTime}Z`;
 
-      filters.push(`start/dateTime ge '${formattedStartDateTime}'`);
-      console.error(`Using start filter: start/dateTime ge '${formattedStartDateTime}'`);
-    }
-    if (endDateTime) {
-      const formattedEndDateTime = hasTzIndicator(endDateTime)
-        ? endDateTime
-        : `${endDateTime}Z`;
-
-      filters.push(`end/dateTime le '${formattedEndDateTime}'`);
-      console.error(`Using end filter: end/dateTime le '${formattedEndDateTime}'`);
-    }
-    queryParams.$filter = filters.join(' and ');
-  }
-  
-  // If requesting events by date, add a fallback filter on view range
+  // For a bounded date range, use calendarView as the authoritative source.
+  // calendarView expands recurring-series occurrences; the /events collection
+  // only returns the master series, so a recurring meeting whose series began
+  // earlier never matches a same-day start/end filter (this is exactly why a
+  // recurring standup was missed and minutes fell back to a single recipient).
+  // Return the calendarView result directly — an empty result is the correct
+  // answer for that window. Only fall back to /events if calendarView errors.
   if (startDateTime && endDateTime) {
-    // Try calendar view approach as a more reliable way to get events in a specific date range
+    const formattedStartDateTime = hasTzIndicator(startDateTime) ? startDateTime : `${startDateTime}Z`;
+    const formattedEndDateTime = hasTzIndicator(endDateTime) ? endDateTime : `${endDateTime}Z`;
+
     try {
-      console.error('Attempting to use calendarView endpoint for more reliable results');
-      const formattedStartDateTime = hasTzIndicator(startDateTime) ? startDateTime : `${startDateTime}Z`;
-      const formattedEndDateTime = hasTzIndicator(endDateTime) ? endDateTime : `${endDateTime}Z`;
-      
-      const viewParams = {
-        $select: config.CALENDAR_SELECT_FIELDS,
-        $orderby: 'start/dateTime',
-        $top: maxResults
-      };
-      
+      console.error('Using calendarView endpoint (expands recurring occurrences) for ranged list');
       const viewResponse = await callGraphAPI(
         accessToken,
         'GET',
         'me/calendar/calendarView',
         null,
         {
-          ...viewParams,
+          $select: config.CALENDAR_SELECT_FIELDS,
+          $orderby: 'start/dateTime',
+          $top: maxResults,
           startDateTime: formattedStartDateTime,
           endDateTime: formattedEndDateTime
         }
       );
-      
-      if (viewResponse.value && viewResponse.value.length > 0) {
-        console.error(`calendarView returned ${viewResponse.value.length} events`);
-        return formatCalendarResponse(viewResponse);
-      }
-      console.error('calendarView returned no events, falling back to regular query');
+
+      console.error(`calendarView returned ${viewResponse.value ? viewResponse.value.length : 0} events`);
+      return formatCalendarResponse(viewResponse);
     } catch (viewError) {
       console.error('Error using calendarView approach, falling back to regular query:', viewError);
     }
   }
-  
+
+  // No bounded range (or calendarView failed): query the events collection.
+  const queryParams = {
+    $select: config.CALENDAR_SELECT_FIELDS,
+    $orderby: 'start/dateTime',
+    $top: maxResults
+  };
+
+  if (startDateTime || endDateTime) {
+    const filters = [];
+    if (startDateTime) {
+      const formattedStartDateTime = hasTzIndicator(startDateTime) ? startDateTime : `${startDateTime}Z`;
+      filters.push(`start/dateTime ge '${formattedStartDateTime}'`);
+    }
+    if (endDateTime) {
+      const formattedEndDateTime = hasTzIndicator(endDateTime) ? endDateTime : `${endDateTime}Z`;
+      filters.push(`end/dateTime le '${formattedEndDateTime}'`);
+    }
+    queryParams.$filter = filters.join(' and ');
+  }
+
   const response = await callGraphAPI(
     accessToken,
     'GET',
@@ -174,7 +163,7 @@ async function listCalendarEvents(accessToken, params) {
     null,
     queryParams
   );
-  
+
   return formatCalendarResponse(response);
 }
 

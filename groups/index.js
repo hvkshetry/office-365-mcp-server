@@ -32,7 +32,9 @@ async function handleGroups(args) {
         if (params.filter) {
           queryParams.$filter = params.filter;
         } else if (params.displayName) {
-          queryParams.$filter = `startswith(displayName, '${params.displayName}')`;
+          // Escape single quotes for OData (e.g. "O'Brien") to avoid a 400.
+          const escapedDisplayName = String(params.displayName).replace(/'/g, "''");
+          queryParams.$filter = `startswith(displayName, '${escapedDisplayName}')`;
         }
 
         // By default, list only Microsoft 365 groups (unified groups)

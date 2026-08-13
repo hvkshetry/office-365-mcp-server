@@ -2,6 +2,9 @@ const { describe, it, expect } = require('@jest/globals');
 const { filesTools } = require('../files');
 const { ensureAuthenticated } = require('../auth');
 const { callGraphAPI } = require('../utils/graph-api');
+const config = require('../config');
+const fs = require('fs');
+const path = require('path');
 
 jest.mock('../auth', () => ({
   ensureAuthenticated: jest.fn()
@@ -17,6 +20,10 @@ describe('Files Module', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     ensureAuthenticated.mockResolvedValue(mockAccessToken);
+    config.TEMP_FILES_PATH = '/tmp/office-mcp-test-files';
+    if (!fs.existsSync(config.TEMP_FILES_PATH)) {
+      fs.mkdirSync(config.TEMP_FILES_PATH, { recursive: true });
+    }
   });
 
   describe('routing', () => {
@@ -96,6 +103,86 @@ describe('Files Module', () => {
       });
 
       expect(result.content[0].text).toContain('uploaded');
+    });
+  });
+
+  describe('download operation', () => {
+    it('should return inline content for text-like files', async () => {
+      callGraphAPI
+        .mockResolvedValueOnce({
+          id: 'text123',
+          name: 'notes.txt',
+          size: 11,
+          file: { mimeType: 'text/plain' }
+        })
+        .mockResolvedValueOnce('hello world');
+
+      const result = await filesHandler({
+        operation: 'download',
+        fileId: 'text123'
+      });
+
+      const text = result.content[0].text;
+      expect(text).toContain('File content downloaded successfully');
+      expect(text).toContain('hello world');
+      expect(text).toContain('Path Scope: local-to-mcp-server-host');
+    });
+
+    it('should save binary downloads to local temp files', async () => {
+      // Bytes >= 0x80 on purpose. [0,1,2,3] round-trips through
+      // Buffer.from(String(buf), 'utf8') unchanged, so a fixture of low bytes
+      // passes even when the Buffer branch is bypassed and the lossy
+      // String() fallback runs -- the exact corruption this path exists to
+      // prevent. High bytes become U+FFFD and the comparison below catches it.
+      const BINARY = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xde, 0xad, 0xbe, 0xef]);
+      callGraphAPI
+        .mockResolvedValueOnce({
+          id: 'binary123',
+          name: 'recording.mp4',
+          size: BINARY.length,
+          file: { mimeType: 'video/mp4' }
+        })
+        .mockResolvedValueOnce(BINARY);
+
+      const result = await filesHandler({
+        operation: 'download',
+        fileId: 'binary123',
+        driveId: 'drive123'
+      });
+
+      const text = result.content[0].text;
+      expect(text).toContain('Local Path:');
+      expect(text).toContain('MCP Host:');
+      expect(text).toContain('Path Scope: local-to-mcp-server-host');
+      expect(text).toContain('files { operation: "cleanup_download"');
+
+      const localPath = text.match(/Local Path: (.+)/)[1].trim();
+      expect(localPath.startsWith(config.TEMP_FILES_PATH)).toBe(true);
+      expect(fs.existsSync(localPath)).toBe(true);
+      expect(fs.readFileSync(localPath)).toEqual(BINARY);
+      fs.unlinkSync(localPath);
+    });
+
+    it('should clean up temp downloads inside the configured temp directory', async () => {
+      const tempFile = path.join(config.TEMP_FILES_PATH, 'cleanup-target.bin');
+      fs.writeFileSync(tempFile, Buffer.from([1]));
+
+      const result = await filesHandler({
+        operation: 'cleanup_download',
+        path: tempFile
+      });
+
+      expect(result.content[0].text).toContain('Cleaned up downloaded file');
+      expect(fs.existsSync(tempFile)).toBe(false);
+    });
+
+    it('should reject cleanup outside the configured temp directory', async () => {
+      const result = await filesHandler({
+        operation: 'cleanup_download',
+        path: '/tmp/not-office-mcp-test-files/secret.bin'
+      });
+
+      expect(result.content[0].text).toContain('Security: can only clean up files');
     });
   });
 

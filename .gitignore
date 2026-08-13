@@ -72,3 +72,7 @@ add_mailbox_to_schemas.py
 .yarn-integrity
 yarn.lock
 package-lock.json
+
+# Codex leaves an empty .codex here; ignore both file and dir forms
+.codex
+.codex/

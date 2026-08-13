@@ -13,6 +13,8 @@ const RETRY_CONFIG = {
   exponentialBackoff: true
 };
 
+const MAX_REDIRECTS = 5;
+
 // Error message enhancements
 const ERROR_SUGGESTIONS = {
   401: 'Authentication token may have expired. Please re-authenticate.',
@@ -139,7 +141,7 @@ function encodeGraphPath(path) {
  * @param {number} retryCount - Current retry attempt (internal use)
  * @returns {Promise<object>} - The API response
  */
-async function callGraphAPI(accessToken, method, path, data = null, queryParams = {}, customHeaders = {}, retryCount = 0) {
+async function callGraphAPI(accessToken, method, path, data = null, queryParams = {}, customHeaders = {}, retryCount = 0, redirectCount = 0) {
   // For test tokens, we'll simulate the API call
   if (config.USE_TEST_MODE && accessToken.startsWith('test_access_token_')) {
     console.error(`[GRAPH-API] TEST MODE: ${method} ${path}`);
@@ -148,13 +150,14 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
 
   try {
     // Safe logging - only log path without sensitive query params
-    console.error(`[GRAPH-API] ${method} ${path.split('?')[0]}`);
+    const isAbsoluteUrl = /^https?:\/\//i.test(path);
+    console.error(`[GRAPH-API] ${method} ${isAbsoluteUrl ? '[external-url]' : path.split('?')[0]}`);
 
     // Clone queryParams to avoid mutating caller's object
     const params = { ...queryParams };
 
     // Encode path using Graph-aware encoder
-    const encodedPath = encodeGraphPath(path);
+    const encodedPath = isAbsoluteUrl ? path : encodeGraphPath(path);
     
     // Build query string from parameters with special handling for OData filters
     let queryString = '';
@@ -192,7 +195,7 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
       }
     }
 
-    const url = `${config.GRAPH_API_ENDPOINT}${encodedPath}${queryString}`;
+    const url = isAbsoluteUrl ? `${encodedPath}${queryString}` : `${config.GRAPH_API_ENDPOINT}${encodedPath}${queryString}`;
     // Only log full URL in verbose debug mode (may contain sensitive data)
     if (process.env.DEBUG_VERBOSE === 'true') {
       console.error(`[GRAPH-API] Full URL: ${url}`);
@@ -223,25 +226,63 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
     }
 
     return new Promise((resolve, reject) => {
+      const requestHost = new URL(url).hostname;
+      const graphHost = new URL(config.GRAPH_API_ENDPOINT).hostname;
+      const shouldSendAuth = requestHost === graphHost;
       const options = {
         method: method,
         headers: {
-          'Authorization': `Bearer ${accessToken}`,
           'Content-Type': isBinaryRequest ? requestContentType : 'application/json',
+          ...(shouldSendAuth ? { 'Authorization': `Bearer ${accessToken}` } : {}),
           ...customHeaders
         }
       };
 
       const req = https.request(url, options, (res) => {
         const responseContentType = res.headers['content-type'] || '';
+        const location = res.headers.location;
 
-        // Determine if response should be handled as binary
-        const isBinaryResponse = responseContentType.includes('application/octet-stream') ||
-                                responseContentType.includes('image/') ||
-                                responseContentType.includes('audio/') ||
-                                responseContentType.includes('video/') ||
-                                responseContentType.includes('application/pdf') ||
-                                responseContentType.includes('application/vnd.openxmlformats');
+        if ([301, 302, 303, 307, 308].includes(res.statusCode) && location) {
+          res.resume();
+
+          if (!['GET', 'HEAD'].includes(method)) {
+            reject(new Error(`Redirect received for unsupported method ${method}`));
+            return;
+          }
+
+          if (redirectCount >= MAX_REDIRECTS) {
+            reject(new Error(`Too many redirects while calling Microsoft Graph (${MAX_REDIRECTS})`));
+            return;
+          }
+
+          const redirectUrl = new URL(location, url).toString();
+          console.error(`[GRAPH-API] Following redirect ${redirectCount + 1}/${MAX_REDIRECTS}`);
+          callGraphAPI(accessToken, method, redirectUrl, data, {}, customHeaders, retryCount, redirectCount + 1)
+            .then(resolve)
+            .catch(reject);
+          return;
+        }
+
+        // Determine if the response should be handled as binary.
+        //
+        // FAIL-CLOSED: default to binary unless the content type is provably text.
+        // The previous allow-list (octet-stream / image / audio / video / pdf /
+        // vnd.openxmlformats) missed the legacy and macro-enabled Office types --
+        // application/vnd.ms-excel.sheet.macroEnabled.12 (.xlsm), application/msword,
+        // application/vnd.ms-powerpoint, application/zip, ... -- which fell through to
+        // Buffer.concat(chunks).toString('utf8'). Decoding binary as UTF-8 replaces
+        // every invalid byte with U+FFFD, which is IRREVERSIBLE: a 3.6 MB .xlsm
+        // arrived as 6.8 MB with 1.55M mangled bytes and an unreadable zip directory.
+        // Misclassifying text as binary, by contrast, is harmless -- the caller gets
+        // a Buffer saved to a temp file instead of inline text, losing nothing.
+        // JSON parsing below is unaffected (json is classified as text here).
+        const isTextResponse = responseContentType.includes('json') ||
+                               responseContentType.startsWith('text/') ||
+                               responseContentType.includes('xml') ||
+                               responseContentType.includes('csv') ||
+                               responseContentType.includes('javascript') ||
+                               responseContentType.includes('x-www-form-urlencoded');
+        const isBinaryResponse = !isTextResponse;
 
         // Collect response data - use array of buffers for binary, string for text
         const chunks = [];
@@ -251,10 +292,13 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
         });
 
         res.on('end', () => {
-          // Combine chunks appropriately
-          const responseData = isBinaryResponse
-            ? Buffer.concat(chunks)
-            : Buffer.concat(chunks).toString('utf8');
+          // Combine chunks appropriately. Empty bodies (204s etc.) stay on the string
+          // path regardless of classification: callers test `!response`, and an empty
+          // Buffer is truthy where the empty string they used to get is falsy.
+          const rawBody = Buffer.concat(chunks);
+          const responseData = (isBinaryResponse && rawBody.length > 0)
+            ? rawBody
+            : rawBody.toString('utf8');
 
           if (res.statusCode >= 200 && res.statusCode < 300) {
             // Handle binary responses

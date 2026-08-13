@@ -8,6 +8,10 @@ const { callGraphAPI } = require('../utils/graph-api');
 const config = require('../config');
 const { safeTool } = require('../utils/errors');
 const { validateId } = require('../utils/validate');
+const fs = require('fs');
+const nodePath = require('path');
+const os = require('os');
+const crypto = require('crypto');
 
 /**
  * Build the correct Graph API endpoint for a drive item.
@@ -60,7 +64,7 @@ async function handleFiles(args) {
     return {
       content: [{ 
         type: "text", 
-        text: "Missing required parameter: operation. Valid operations are: list, get, upload, download, delete, share, search, move, copy, create_folder" 
+        text: "Missing required parameter: operation. Valid operations are: list, get, upload, download, cleanup_download, delete, share, search, move, copy, create_folder" 
       }]
     };
   }
@@ -77,6 +81,8 @@ async function handleFiles(args) {
         return await uploadFile(accessToken, params);
       case 'download':
         return await downloadFile(accessToken, params);
+      case 'cleanup_download':
+        return await cleanupDownload(params);
       case 'delete':
         return await deleteFile(accessToken, params);
       case 'share':
@@ -93,7 +99,7 @@ async function handleFiles(args) {
         return {
           content: [{ 
             type: "text", 
-            text: `Invalid operation: ${operation}. Valid operations are: list, get, upload, download, delete, share, search, move, copy, create_folder` 
+            text: `Invalid operation: ${operation}. Valid operations are: list, get, upload, download, cleanup_download, delete, share, search, move, copy, create_folder` 
           }]
         };
     }
@@ -288,6 +294,29 @@ async function downloadFile(accessToken, params) {
     ? `${driveItemEndpoint(fileId, driveId)}/content`
     : `${drivePathEndpoint(path, driveId)}:/content`;
 
+  const metadataEndpoint = fileId
+    ? driveItemEndpoint(fileId, driveId)
+    : drivePathEndpoint(path, driveId);
+
+  const metadata = await callGraphAPI(
+    accessToken,
+    'GET',
+    metadataEndpoint,
+    null,
+    {
+      $select: 'id,name,size,file,folder,webUrl,@microsoft.graph.downloadUrl'
+    }
+  );
+
+  if (metadata.folder) {
+    return {
+      content: [{
+        type: "text",
+        text: "Cannot download a folder. Provide a fileId or path for a file."
+      }]
+    };
+  }
+
   try {
     const content = await callGraphAPI(
       accessToken,
@@ -295,37 +324,129 @@ async function downloadFile(accessToken, params) {
       endpoint
     );
 
+    return formatDownloadedContent(content, metadata, fileId, driveId);
+  } catch (error) {
+    if (metadata['@microsoft.graph.downloadUrl']) {
+      try {
+        const content = await callGraphAPI(
+          accessToken,
+          'GET',
+          metadata['@microsoft.graph.downloadUrl']
+        );
+
+        return formatDownloadedContent(content, metadata, fileId, driveId);
+      } catch (downloadUrlError) {
+        throw new Error(`Unable to download file content via Graph /content or downloadUrl. /content error: ${error.message}. downloadUrl error: ${downloadUrlError.message}`);
+      }
+    }
+
+    throw error;
+  }
+}
+
+function formatDownloadedContent(content, metadata, fileId, driveId) {
+  const mimeType = metadata.file?.mimeType || 'application/octet-stream';
+  const fileName = metadata.name || 'download';
+  const source = [
+    `File: ${fileName}`,
+    `MIME Type: ${mimeType}`,
+    metadata.size !== undefined ? `Size: ${metadata.size} bytes` : null,
+    metadata.id ? `File ID: ${metadata.id}` : (fileId ? `File ID: ${fileId}` : null),
+    driveId ? `Drive ID: ${driveId}` : null,
+    `MCP Host: ${os.hostname()}`,
+    `Path Scope: local-to-mcp-server-host`
+  ].filter(Boolean).join('\n');
+
+  if (Buffer.isBuffer(content)) {
+    const localPath = saveDownloadedFile(content, fileName, metadata.id || fileId || metadata.webUrl || fileName);
     return {
       content: [{
         type: "text",
-        text: `File content downloaded successfully.\nContent length: ${content.length} bytes\n\nContent:\n${content}`
+        text: `${source}\nLocal Path: ${localPath}\n\nDownloaded binary file to local temp storage. Use local document/media tools on this path from the same host running the MCP server. Clean up with: files { operation: "cleanup_download", path: "${localPath}" }`
       }]
     };
-  } catch (error) {
-    // For binary files, we might get a download URL instead
-    const metadataEndpoint = fileId
-      ? driveItemEndpoint(fileId, driveId)
-      : drivePathEndpoint(path, driveId);
-
-    const metadata = await callGraphAPI(
-      accessToken,
-      'GET',
-      metadataEndpoint,
-      null,
-      { $select: '@microsoft.graph.downloadUrl' }
-    );
-    
-    if (metadata['@microsoft.graph.downloadUrl']) {
-      return {
-        content: [{ 
-          type: "text", 
-          text: `File is binary. Download URL: ${metadata['@microsoft.graph.downloadUrl']}` 
-        }]
-      };
-    }
-    
-    throw error;
   }
+
+  if (typeof content === 'string' && isTextLikeFile(fileName, mimeType)) {
+    return {
+      content: [{
+        type: "text",
+        text: `${source}\n\nFile content downloaded successfully.\nContent length: ${content.length} bytes\n\nContent:\n${content}`
+      }]
+    };
+  }
+
+  const buffer = Buffer.from(String(content), 'utf8');
+  const localPath = saveDownloadedFile(buffer, fileName, metadata.id || fileId || metadata.webUrl || fileName);
+  return {
+    content: [{
+      type: "text",
+      text: `${source}\nLocal Path: ${localPath}\n\nDownloaded file to local temp storage because it is not a text-like response. Clean up with: files { operation: "cleanup_download", path: "${localPath}" }`
+    }]
+  };
+}
+
+function isTextLikeFile(fileName, mimeType) {
+  const lowerName = (fileName || '').toLowerCase();
+  const lowerMime = (mimeType || '').toLowerCase();
+
+  if (lowerMime.startsWith('text/')) return true;
+  if (lowerMime.includes('json') || lowerMime.includes('xml') || lowerMime.includes('csv')) return true;
+
+  return ['.txt', '.md', '.csv', '.json', '.xml', '.html', '.htm', '.vtt', '.srt', '.log']
+    .some(ext => lowerName.endsWith(ext));
+}
+
+function saveDownloadedFile(contentBuffer, originalName, uniqueSeed) {
+  const tempDir = config.TEMP_FILES_PATH;
+
+  if (!fs.existsSync(tempDir)) {
+    fs.mkdirSync(tempDir, { recursive: true });
+  }
+
+  const safeName = (originalName || 'download').replace(/[^a-zA-Z0-9._-]/g, '_');
+  const hash = crypto.createHash('sha256').update(String(uniqueSeed)).digest('hex').substring(0, 8);
+  const filePath = nodePath.join(tempDir, `${Date.now()}_${hash}_${safeName}`);
+
+  fs.writeFileSync(filePath, contentBuffer);
+  return filePath;
+}
+
+async function cleanupDownload(params) {
+  const { path } = params;
+
+  if (!path) {
+    return {
+      content: [{
+        type: "text",
+        text: "Missing required parameter: path"
+      }]
+    };
+  }
+
+  const tempDir = config.TEMP_FILES_PATH;
+  const resolvedTempDir = nodePath.resolve(tempDir);
+  const resolvedPath = nodePath.resolve(path);
+
+  if (!resolvedPath.startsWith(resolvedTempDir + nodePath.sep)) {
+    return {
+      content: [{
+        type: "text",
+        text: `Security: can only clean up files in ${tempDir}. Provided path is outside the temp directory.`
+      }]
+    };
+  }
+
+  if (!fs.existsSync(resolvedPath)) {
+    return {
+      content: [{ type: "text", text: "File not found or already cleaned up." }]
+    };
+  }
+
+  fs.unlinkSync(resolvedPath);
+  return {
+    content: [{ type: "text", text: `Cleaned up downloaded file: ${resolvedPath}` }]
+  };
 }
 
 /**
@@ -467,33 +588,64 @@ async function searchFiles(accessToken, params) {
     ? `/me/drive/search(q='${encodeURIComponent(searchQuery)}')`
     : `/search/query`;
 
-  const body = effectiveScope !== 'me' ? {
-    requests: [{
-      entityTypes: ['driveItem'],
-      query: {
-        queryString: searchQuery
-      },
-      size: maxResults
-    }]
-  } : null;
+  // Graph caps a single /search/query request well below what callers ask for,
+  // and returns the first hitsContainer only. Issuing one request and reporting
+  // its length as the answer silently truncated: a folder of 51 PDFs came back
+  // as 20 with nothing to indicate the other 31 existed. Page until the caller's
+  // maxResults is satisfied or Graph says there is no more.
+  const PAGE_SIZE = 25;
+  const items = [];
+  let reportedTotal = null;
+  let moreAvailable = false;
 
-  const response = await callGraphAPI(
-    accessToken,
-    effectiveScope === 'me' ? 'GET' : 'POST',
-    endpoint,
-    body,
-    effectiveScope === 'me' ? { $top: maxResults } : {}
-  );
+  if (effectiveScope === 'me') {
+    // /me/drive/search pages with @odata.nextLink, an absolute URL.
+    let next = null;
+    do {
+      const response = next
+        ? await callGraphAPI(accessToken, 'GET', next)
+        : await callGraphAPI(accessToken, 'GET', endpoint, null, { $top: Math.min(PAGE_SIZE, maxResults) });
+      const batch = response.value || [];
+      items.push(...batch);
+      next = response['@odata.nextLink'] || null;
+      if (batch.length === 0) break;
+    } while (next && items.length < maxResults);
+    moreAvailable = Boolean(next) && items.length >= maxResults;
+  } else {
+    let from = 0;
+    for (;;) {
+      const response = await callGraphAPI(accessToken, 'POST', endpoint, {
+        requests: [{
+          entityTypes: ['driveItem'],
+          query: { queryString: searchQuery },
+          from,
+          size: Math.min(PAGE_SIZE, maxResults - items.length)
+        }]
+      }, {});
 
-  const items = effectiveScope === 'me' ? response.value : response.value[0].hitsContainers[0].hits;
-  
+      const container = response.value?.[0]?.hitsContainers?.[0];
+      const batch = container?.hits || [];
+      if (reportedTotal === null && typeof container?.total === 'number') {
+        reportedTotal = container.total;
+      }
+      moreAvailable = Boolean(container?.moreResultsAvailable);
+      items.push(...batch);
+
+      if (batch.length === 0 || !moreAvailable || items.length >= maxResults) break;
+      from += batch.length;
+    }
+  }
+
   if (!items || items.length === 0) {
     return {
       content: [{ type: "text", text: "No files found matching your search." }]
     };
   }
-  
-  const results = items.map((item, index) => {
+
+  const shown = items.slice(0, maxResults);
+  const truncated = moreAvailable || (reportedTotal !== null && reportedTotal > shown.length);
+
+  const results = shown.map((item, index) => {
     const file = effectiveScope === 'me' ? item : item.resource;
     const driveInfo = file.parentReference?.driveId
       ? `\n   DriveID: ${file.parentReference.driveId}`
@@ -504,11 +656,20 @@ async function searchFiles(accessToken, params) {
    Modified: ${new Date(file.lastModifiedDateTime).toLocaleString()}
    ID: ${file.id}${driveInfo}`;
   }).join('\n\n');
-  
+
+  // State the total when Graph gives one, and never let a truncated list read
+  // as the complete set -- that is what made 51 PDFs look like 20.
+  const header = reportedTotal !== null && reportedTotal > shown.length
+    ? `Showing ${shown.length} of ${reportedTotal} matching files`
+    : `Found ${shown.length} files`;
+  const note = truncated
+    ? `\n\nTRUNCATED: more matches exist than are shown. Raise maxResults (currently ${maxResults}) or narrow the query.`
+    : '';
+
   return {
-    content: [{ 
-      type: "text", 
-      text: `Found ${items.length} files:\n\n${results}` 
+    content: [{
+      type: "text",
+      text: `${header}:\n\n${results}${note}`
     }]
   };
 }
@@ -638,18 +799,18 @@ async function createFolder(accessToken, params) {
 const filesTools = [
   {
     name: "files",
-    description: "Manage OneDrive and SharePoint files: list, get, upload, download, delete, share, search, move, copy, create_folder",
+    description: "Manage OneDrive and SharePoint files: list, get, upload, download, cleanup_download, delete, share, search, move, copy, create_folder",
     inputSchema: {
       type: "object",
       properties: {
         operation: { 
           type: "string", 
-          enum: ["list", "get", "upload", "download", "delete", "share", "search", "move", "copy", "create_folder"],
+          enum: ["list", "get", "upload", "download", "cleanup_download", "delete", "share", "search", "move", "copy", "create_folder"],
           description: "The operation to perform" 
         },
         // Common parameters
         fileId: { type: "string", description: "File or folder ID" },
-        path: { type: "string", description: "File path (alternative to fileId)" },
+        path: { type: "string", description: "File path (alternative to fileId, or local temp path for cleanup_download)" },
         // List parameters
         siteId: { type: "string", description: "SharePoint site ID" },
         driveId: { type: "string", description: "Drive ID (required for SharePoint files; returned by search as DriveID)" },
@@ -702,6 +863,13 @@ const filesTools = [
         // General parameters
         maxResults: { type: "number", description: "Maximum number of results" }
       },
+      // An unknown property used to be accepted and ignored. Passing `itemId`
+      // where `folderId` was meant therefore did not fail -- the list fell back
+      // to the drive root and returned a plausible listing of the wrong folder,
+      // which reads as "that folder is empty" or "the file is not there". A
+      // caller cannot distinguish that from a real answer, and it is what sent
+      // the original #35 investigation after a tool bug that did not exist.
+      additionalProperties: false,
       required: ["operation"]
     },
     handler: safeTool('files', handleFiles)
@@ -824,10 +992,48 @@ const filesTools = [
           ? `${config.SHAREPOINT_SYMLINK_PATH}/${pathComponents.join('/')}`
           : config.SHAREPOINT_SYMLINK_PATH;
         
+        // Every path above is a guess: the site-name transform is a pile of
+        // regex heuristics and nothing has looked at the filesystem. Reporting
+        // "mapped successfully" for a path that does not exist sends the caller
+        // to read a file that was never there, and the read failure then reads
+        // as "the document is missing" rather than "this host has no sync".
+        const pathExists = (p) => {
+          try {
+            return fs.existsSync(p);
+          } catch {
+            return false;
+          }
+        };
+
+        const candidates = [
+          { label: 'Windows path', value: localPath },
+          { label: 'WSL/Linux path', value: wslPath },
+          { label: 'Symlink path (for subagent)', value: symlinkPath }
+        ].map(c => ({ ...c, exists: pathExists(c.value) }));
+
+        const verified = candidates.filter(c => c.exists);
+        const rootPresent = pathExists(baseSyncPath) || pathExists(config.SHAREPOINT_SYMLINK_PATH);
+        const render = candidates
+          .map(c => `${c.exists ? '[verified]' : '[not found]'} ${c.label}:\n${c.value}`)
+          .join('\n\n');
+
+        if (verified.length > 0) {
+          return {
+            content: [{
+              type: "text",
+              text: `SharePoint URL mapped to an existing local path:\n\nSharePoint: ${webUrl}\n\n${render}`
+            }]
+          };
+        }
+
+        const cause = rootPresent
+          ? 'A sync root exists, but nothing was found at the mapped location. The site-name transform is heuristic and is the likely culprit.'
+          : `No local sync root exists on this host (checked ${baseSyncPath} and ${config.SHAREPOINT_SYMLINK_PATH}). These files are not synced to this machine.`;
+
         return {
           content: [{
             type: "text",
-            text: `SharePoint URL mapped successfully:\n\nSharePoint: ${webUrl}\n\nWindows path:\n${localPath}\n\nWSL/Linux path:\n${wslPath}\n\nSymlink path (for subagent):\n${symlinkPath}`
+            text: `SharePoint URL could NOT be mapped to a local path.\n\n${cause}\n\nDo not read the paths below - none of them exist. Use the Graph API instead: files { operation: "search" } to locate the item, then files { operation: "download", driveId, fileId } to fetch its content to a local temp file.\n\nSharePoint: ${webUrl}\n\nUnverified candidates:\n\n${render}`
           }]
         };
       } catch (error) {

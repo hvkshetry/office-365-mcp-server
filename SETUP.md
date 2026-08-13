@@ -66,6 +66,7 @@ Complete setup guide for the Office MCP Server - a Model Context Protocol server
    SHAREPOINT_SYNC_PATH=/path/to/sharepoint/sync
    ONEDRIVE_SYNC_PATH=/path/to/onedrive/sync
    TEMP_ATTACHMENTS_PATH=/path/to/temp/attachments
+   TEMP_FILES_PATH=/path/to/temp/files
    ```
 
 ### Claude Desktop Configuration
