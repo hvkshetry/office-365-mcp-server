@@ -1,0 +1,116 @@
+{
+  "legal_persona_allowlist": {
+    "calendar": [
+      "get",
+      "list"
+    ],
+    "contacts": [
+      "get",
+      "list",
+      "list_folders",
+      "search"
+    ],
+    "directory": [
+      "get_manager",
+      "get_presence",
+      "get_profile",
+      "get_reports",
+      "lookup_user",
+      "search_users"
+    ],
+    "files": [
+      "download",
+      "get",
+      "list",
+      "search"
+    ],
+    "files_map_sharepoint_path": null,
+    "groups": [
+      "get",
+      "get_drive",
+      "list",
+      "list_drives",
+      "list_members",
+      "list_owners"
+    ],
+    "mail": [
+      "cleanup_attachment",
+      "draft",
+      "draft_reply_all",
+      "focused",
+      "get_attachment",
+      "list",
+      "list_drafts",
+      "read",
+      "search",
+      "update_draft"
+    ],
+    "notifications": [
+      "list"
+    ],
+    "planner": [
+      "get",
+      "get_assignments",
+      "get_details",
+      "get_tasks",
+      "list",
+      "lookup"
+    ],
+    "search": null,
+    "system": [
+      "about",
+      "check_status"
+    ],
+    "teams_channel": [
+      "get",
+      "get_message",
+      "list",
+      "list_members",
+      "list_messages",
+      "list_tabs"
+    ],
+    "teams_chat": [
+      "get",
+      "get_message",
+      "list",
+      "list_members",
+      "list_messages"
+    ],
+    "teams_meeting": [
+      "find_by_url",
+      "get",
+      "get_insights",
+      "get_participants",
+      "get_recording",
+      "get_transcript",
+      "list_recordings",
+      "list_transcripts"
+    ],
+    "todo": [
+      "get_list",
+      "get_task",
+      "list_checklist",
+      "list_lists",
+      "list_tasks"
+    ]
+  },
+  "schema_version": "puran.office-legal-tool-surface/v1",
+  "tool_names": [
+    "calendar",
+    "contacts",
+    "directory",
+    "files",
+    "files_map_sharepoint_path",
+    "groups",
+    "mail",
+    "notifications",
+    "planner",
+    "search",
+    "system",
+    "teams_channel",
+    "teams_chat",
+    "teams_meeting",
+    "todo"
+  ],
+  "tool_schema_sha256": "cb62fd6cc7302ee18f6c1133956a2c1d35d2e280e15dac3fc35f5f087723202e"
+}

@@ -77,6 +77,41 @@ afterEach(() => {
 });
 
 describe('mail reply draft-send fallback', () => {
+  it('creates a reply-all draft without transmitting it', async () => {
+    const mailbox = 'legal.agent@circleh2o.com';
+    const { mail, callGraphAPI, recordSideEffect } = loadMailWithMocks();
+
+    callGraphAPI.mockResolvedValueOnce({ id: 'draft-legal-1' });
+
+    const result = await mail({
+      operation: 'draft_reply_all',
+      emailId: 'message-legal-1',
+      body: '<p>Draft-only response</p>',
+      mailbox
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      draftId: 'draft-legal-1',
+      sent: false,
+      fallback: null
+    }));
+    expect(callGraphAPI).toHaveBeenCalledTimes(1);
+    expect(callGraphAPI).toHaveBeenCalledWith(
+      'access-token',
+      'POST',
+      `${'users/' + mailbox}/messages/message-legal-1/createReplyAll`,
+      { comment: '<p>Draft-only response</p>' },
+      null
+    );
+    expect(callGraphAPI.mock.calls.some(call => String(call[2]).endsWith('/send'))).toBe(false);
+    expect(recordSideEffect).toHaveBeenCalledWith(
+      'mail.draft_reply_all',
+      'success',
+      mailbox,
+      expect.objectContaining({ sent: false, draftId: 'draft-legal-1' })
+    );
+  });
+
   it('falls back from replyAll action 503 to a threaded draft send', async () => {
     const mailbox = 'engineering.agent@circleh2o.com';
     const { mail, callGraphAPI, recordSideEffect } = loadMailWithMocks();

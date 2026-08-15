@@ -7,6 +7,35 @@
 
 let _cachedPolicy;
 
+const LEGAL_MAILBOX = 'legal.agent@circleh2o.com';
+const LEGAL_TOOL_MANIFEST = Object.freeze({
+  system: new Set(['about', 'check_status']),
+  mail: new Set([
+    'list', 'read', 'get_attachment', 'cleanup_attachment', 'search', 'focused',
+    'list_drafts', 'draft', 'update_draft', 'draft_reply_all'
+  ]),
+  calendar: new Set(['list', 'get']),
+  teams_meeting: new Set([
+    'get', 'find_by_url', 'list_transcripts', 'get_transcript',
+    'list_recordings', 'get_recording', 'get_participants', 'get_insights'
+  ]),
+  teams_channel: new Set(['list', 'get', 'list_messages', 'get_message', 'list_members', 'list_tabs']),
+  teams_chat: new Set(['list', 'get', 'list_messages', 'get_message', 'list_members']),
+  planner: new Set(['list', 'get', 'get_details', 'get_assignments', 'get_tasks', 'lookup']),
+  files: new Set(['list', 'get', 'download', 'search']),
+  files_map_sharepoint_path: null,
+  search: null,
+  contacts: new Set(['list', 'search', 'get', 'list_folders']),
+  notifications: new Set(['list']),
+  todo: new Set(['list_lists', 'get_list', 'list_tasks', 'get_task', 'list_checklist']),
+  groups: new Set(['list', 'get', 'list_members', 'list_owners', 'get_drive', 'list_drives']),
+  directory: new Set(['lookup_user', 'get_profile', 'get_manager', 'get_reports', 'get_presence', 'search_users'])
+});
+
+function isLegalDraftOnly() {
+  return ['1', 'true', 'yes'].includes(String(process.env.LEGAL_AGENT_DRAFT_ONLY || '').toLowerCase());
+}
+
 function getExecutionPolicy() {
   if (_cachedPolicy !== undefined) {
     return _cachedPolicy;
@@ -22,7 +51,7 @@ function getExecutionPolicy() {
     _cachedPolicy = JSON.parse(raw);
   } catch (error) {
     console.error('[POLICY] Failed to parse COMMUNICATION_AGENT_POLICY_JSON:', error.message);
-    _cachedPolicy = null;
+    _cachedPolicy = { invalid: true };
   }
 
   return _cachedPolicy;
@@ -68,6 +97,10 @@ function _mailOperationAllowed(policy, operation) {
   switch (operation) {
     case 'draft':
       return !!mailPolicy.draft;
+    case 'draft_reply_all':
+      return !!mailPolicy.draft_reply_all;
+    case 'update_draft':
+      return !!mailPolicy.update_draft;
     case 'send':
       return !!mailPolicy.send;
     case 'reply':
@@ -75,8 +108,38 @@ function _mailOperationAllowed(policy, operation) {
     case 'send_draft':
       return !!mailPolicy.send_draft;
     default:
-      return true;
+      return false;
   }
+}
+
+async function enforceOfficeToolPolicy(toolName, args = {}) {
+  if (!isLegalDraftOnly()) {
+    return null;
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(LEGAL_TOOL_MANIFEST, toolName)) {
+    const reason = `Blocked by Legal OS tool manifest: ${toolName} is not reviewed`;
+    await recordSideEffect('legal.tool.blocked', 'blocked', toolName, { reason });
+    return reason;
+  }
+
+  const allowedOperations = LEGAL_TOOL_MANIFEST[toolName];
+  const operation = args?.operation;
+  if (allowedOperations !== null && (!operation || !allowedOperations.has(operation))) {
+    const reason = `Blocked by Legal OS tool manifest: ${toolName}.${operation || '<missing>'} is not allowed`;
+    await recordSideEffect('legal.tool.blocked', 'blocked', toolName, { reason, operation });
+    return reason;
+  }
+
+  if (toolName === 'mail' && ['draft', 'update_draft', 'draft_reply_all'].includes(operation)) {
+    const mailbox = String(args.mailbox || '').toLowerCase();
+    if (mailbox !== LEGAL_MAILBOX) {
+      const reason = `Blocked by Legal OS: ${operation} must explicitly use mailbox "${LEGAL_MAILBOX}"`;
+      await recordSideEffect(`mail.${operation}`, 'blocked', mailbox || null, { reason });
+      return reason;
+    }
+  }
+  return null;
 }
 
 // --------------------------------------------------------------------------
@@ -151,6 +214,20 @@ function _recipientViolation(policy, params) {
 
 async function enforceMailPolicy(operation, params = {}) {
   const policy = getExecutionPolicy();
+  if (isLegalDraftOnly() && ['send', 'reply', 'send_draft'].includes(operation)) {
+    const reason = `Blocked by Legal OS draft-only policy: mail ${operation} is forbidden`;
+    await recordSideEffect(`mail.${operation}`, 'blocked', params.mailbox || null, { reason });
+    return reason;
+  }
+  if (isLegalDraftOnly() && ['draft', 'update_draft', 'draft_reply_all'].includes(operation)) {
+    const mailbox = String(params.mailbox || '').toLowerCase();
+    if (mailbox !== LEGAL_MAILBOX) {
+      return `Blocked by Legal OS: ${operation} must explicitly use mailbox "${LEGAL_MAILBOX}"`;
+    }
+  }
+  if (policy?.invalid) {
+    return 'Blocked: COMMUNICATION_AGENT_POLICY_JSON is invalid';
+  }
   if (!policy) {
     return null;
   }
@@ -159,7 +236,7 @@ async function enforceMailPolicy(operation, params = {}) {
   // `update_draft`: a draft addressed externally is one click from being sent,
   // and update_draft is precisely how an internally-addressed draft gets
   // re-pointed at an outsider.
-  if (['send', 'reply', 'draft', 'update_draft'].includes(operation)) {
+  if (['send', 'reply', 'draft', 'update_draft', 'draft_reply_all'].includes(operation)) {
     const external = _recipientViolation(policy, params);
     if (external) {
       const reason =
@@ -252,8 +329,11 @@ async function enforceCalendarPolicy(args = {}) {
 }
 
 module.exports = {
+  LEGAL_TOOL_MANIFEST,
   getExecutionPolicy,
+  isLegalDraftOnly,
   recordSideEffect,
+  enforceOfficeToolPolicy,
   enforceMailPolicy,
   enforcePlannerPolicy,
   enforceCalendarPolicy

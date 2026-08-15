@@ -192,8 +192,8 @@ function buildFallbackReplyRecipients(originalMessage, params, selfAddresses) {
   return { toRecipients, ccRecipients };
 }
 
-async function sendReplyViaDraftFallback(accessToken, params, prefix, fileAttachments = []) {
-  console.error('[EMAIL] Reply action hit mailbox routing error; using draft-send fallback');
+async function createReplyViaDraftFallback(accessToken, params, prefix, fileAttachments = []) {
+  console.error('[EMAIL] Reply action hit mailbox routing error; using threaded draft fallback');
 
   const [originalMessage, selfAddresses] = await Promise.all([
     fetchReplySourceMessage(accessToken, prefix, params.emailId),
@@ -243,19 +243,28 @@ async function sendReplyViaDraftFallback(accessToken, params, prefix, fileAttach
     );
   }
 
-  await callGraphAPI(
-    accessToken,
-    'POST',
-    `${prefix}/messages/${draft.id}/send`,
-    null,
-    null
-  );
-
   return {
     draftId: draft.id,
     conversationId: originalMessage.conversationId || null,
     attachments: fileAttachments.length
   };
+}
+
+async function sendReplyViaDraftFallback(accessToken, params, prefix, fileAttachments = []) {
+  const draft = await createReplyViaDraftFallback(
+    accessToken,
+    params,
+    prefix,
+    fileAttachments
+  );
+  await callGraphAPI(
+    accessToken,
+    'POST',
+    `${prefix}/messages/${draft.draftId}/send`,
+    null,
+    null
+  );
+  return draft;
 }
 
 // ============== CORE EMAIL CRUD ==============
@@ -279,7 +288,7 @@ async function handleEmail(args) {
     return {
       content: [{
         type: "text",
-        text: "Missing required parameter: operation. Valid operations are: list, read, get_attachment, cleanup_attachment, send, reply, draft, update_draft, send_draft, list_drafts"
+        text: "Missing required parameter: operation. Valid operations are: list, read, get_attachment, cleanup_attachment, send, reply, draft_reply_all, draft, update_draft, send_draft, list_drafts"
       }]
     };
   }
@@ -304,6 +313,9 @@ async function handleEmail(args) {
       case 'reply':
         console.error('[EMAIL] Replying to email');
         return await replyToEmail(await resolveSendToken(accessToken, params), params);
+      case 'draft_reply_all':
+        console.error('[EMAIL] Creating reply-all draft');
+        return await createReplyAllDraft(accessToken, params);
       case 'draft':
         console.error('[EMAIL] Creating draft');
         return await createDraft(accessToken, params);
@@ -317,7 +329,7 @@ async function handleEmail(args) {
         return {
           content: [{
             type: "text",
-            text: `Invalid operation: ${operation}. Valid operations are: list, read, send, reply, draft, update_draft, send_draft, list_drafts`
+            text: `Invalid operation: ${operation}. Valid operations are: list, read, send, reply, draft_reply_all, draft, update_draft, send_draft, list_drafts`
           }]
         };
     }
@@ -861,6 +873,80 @@ async function replyToEmail(accessToken, params) {
   }
 }
 
+async function createReplyAllDraft(accessToken, params) {
+  try {
+    const policyError = await enforceMailPolicy('draft_reply_all', params);
+    if (policyError) {
+      return { content: [{ type: 'text', text: policyError }] };
+    }
+    if (!params?.emailId || !params?.body) {
+      return {
+        content: [{
+          type: 'text',
+          text: 'Missing required parameters: emailId and body for draft_reply_all'
+        }]
+      };
+    }
+    validateId(params.emailId, 'emailId');
+    const prefix = config.getMailboxPrefix(params.mailbox);
+    const fileAttachments = params.attachments?.length
+      ? buildFileAttachments(params.attachments)
+      : [];
+    let draft;
+    let fallback = null;
+    try {
+      draft = await callGraphAPI(
+        accessToken,
+        'POST',
+        `${prefix}/messages/${params.emailId}/createReplyAll`,
+        { comment: params.body },
+        null
+      );
+      for (const attachment of fileAttachments) {
+        await callGraphAPI(
+          accessToken,
+          'POST',
+          `${prefix}/messages/${draft.id}/attachments`,
+          attachment,
+          null
+        );
+      }
+    } catch (actionError) {
+      if (!isReplyActionRoutingError(actionError)) throw actionError;
+      const fallbackDraft = await createReplyViaDraftFallback(
+        accessToken,
+        { ...params, replyAll: true },
+        prefix,
+        fileAttachments
+      );
+      draft = { id: fallbackDraft.draftId, conversationId: fallbackDraft.conversationId };
+      fallback = 'threaded-draft';
+    }
+    await recordSideEffect('mail.draft_reply_all', 'success', params.mailbox || null, {
+      emailId: params.emailId,
+      draftId: draft.id,
+      attachments: fileAttachments.length,
+      fallback,
+      sent: false
+    });
+    return {
+      draftId: draft.id,
+      sent: false,
+      fallback,
+      content: [{
+        type: 'text',
+        text: `Reply-all draft created. Draft ID: ${draft.id}. No message was sent.`
+      }]
+    };
+  } catch (error) {
+    await recordSideEffect('mail.draft_reply_all', 'failed', params?.mailbox || null, {
+      emailId: params?.emailId || null,
+      error: error.message
+    });
+    return { content: [{ type: 'text', text: `Reply-all draft error: ${error.message}` }] };
+  }
+}
+
 // ============== DRAFT EMAIL FUNCTIONS ==============
 
 function wrapHtmlBody(bodyContent) {
@@ -1204,7 +1290,7 @@ async function handleMail(args) {
     return {
       content: [{
         type: "text",
-        text: "Missing required parameter: operation. Valid operations: list, read, get_attachment, cleanup_attachment, send, reply, draft, update_draft, send_draft, list_drafts, search, move, list_folders, create_folder, list_rules, create_rule, focused, list_categories, create_category, apply_category, remove_category"
+        text: "Missing required parameter: operation. Valid operations: list, read, get_attachment, cleanup_attachment, send, reply, draft_reply_all, draft, update_draft, send_draft, list_drafts, search, move, list_folders, create_folder, list_rules, create_rule, focused, list_categories, create_category, apply_category, remove_category"
       }]
     };
   }
@@ -1218,6 +1304,7 @@ async function handleMail(args) {
       case 'cleanup_attachment':
       case 'send':
       case 'reply':
+      case 'draft_reply_all':
       case 'draft':
       case 'update_draft':
       case 'send_draft':
@@ -1264,7 +1351,7 @@ async function handleMail(args) {
         return {
           content: [{
             type: "text",
-            text: `Invalid operation: ${operation}. Valid operations: list, read, get_attachment, cleanup_attachment, send, reply, draft, update_draft, send_draft, list_drafts, search, move, list_folders, create_folder, list_rules, create_rule, focused, list_categories, create_category, apply_category, remove_category`
+            text: `Invalid operation: ${operation}. Valid operations: list, read, get_attachment, cleanup_attachment, send, reply, draft_reply_all, draft, update_draft, send_draft, list_drafts, search, move, list_folders, create_folder, list_rules, create_rule, focused, list_categories, create_category, apply_category, remove_category`
           }]
         };
     }
@@ -1280,7 +1367,7 @@ async function handleMail(args) {
 const emailTools = [
   {
     name: "mail",
-    description: "Unified email management: list, read, send, reply, draft, search, move, folders, rules, categories, and focused inbox. Reply auto-falls back to draft-send when Graph reply actions return mailbox move or cross-server 503 routing errors.",
+    description: "Unified email management. draft_reply_all creates a threaded reply-all draft and never sends it; reply/send/send_draft are transmission operations.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1288,7 +1375,7 @@ const emailTools = [
           type: "string",
           enum: [
             "list", "read", "get_attachment", "cleanup_attachment",
-            "send", "reply", "draft", "update_draft", "send_draft", "list_drafts",
+            "send", "reply", "draft_reply_all", "draft", "update_draft", "send_draft", "list_drafts",
             "search", "move",
             "list_folders", "create_folder",
             "list_rules", "create_rule",
@@ -1298,7 +1385,7 @@ const emailTools = [
           description: "The operation to perform"
         },
         // Core email parameters
-        emailId: { type: "string", description: "Email ID (for read, get_attachment, reply, move, apply_category)" },
+        emailId: { type: "string", description: "Email ID (for read, get_attachment, reply, draft_reply_all, move, apply_category)" },
         attachmentId: { type: "string", description: "Attachment ID (for get_attachment — get IDs from read)" },
         path: { type: "string", description: "Local file path (for cleanup_attachment)" },
         to: {
@@ -1307,7 +1394,7 @@ const emailTools = [
           description: "Recipient email addresses (for send/draft/reply)"
         },
         subject: { type: "string", description: "Email subject (for send/draft)" },
-        body: { type: "string", description: "Email body in HTML format (for send/draft/reply)" },
+        body: { type: "string", description: "Email body in HTML format (for send/draft/reply/draft_reply_all)" },
         cc: {
           type: "array",
           items: { type: "string" },
@@ -1318,7 +1405,7 @@ const emailTools = [
           items: { type: "string" },
           description: "BCC recipients"
         },
-        replyAll: { type: "boolean", description: "Reply to all recipients (for reply). Default: false. Reply may return fallback: 'draft-send' if Graph reply actions hit mailbox routing errors." },
+        replyAll: { type: "boolean", description: "Reply to all recipients (for reply). draft_reply_all is always reply-all and draft-only." },
         attachments: {
           type: "array",
           items: { type: "string" },

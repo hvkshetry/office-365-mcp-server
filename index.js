@@ -16,6 +16,7 @@ const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio
 const { ListToolsRequestSchema, CallToolRequestSchema, McpError, ErrorCode } = require("@modelcontextprotocol/sdk/types.js");
 const config = require('./config');
 const { auditLog } = require('./utils/audit');
+const { enforceOfficeToolPolicy } = require('./policy');
 
 // Import module tools
 const { authTools } = require('./auth');
@@ -82,6 +83,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const tool = TOOLS.find(t => t.name === name);
   if (!tool) {
     throw new McpError(ErrorCode.MethodNotFound, `Tool not found: ${name}`);
+  }
+  const policyError = await enforceOfficeToolPolicy(name, args);
+  if (policyError) {
+    return { content: [{ type: 'text', text: policyError }], isError: true };
   }
   return await tool.handler(args);
 });

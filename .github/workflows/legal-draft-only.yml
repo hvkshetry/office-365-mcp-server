@@ -1,0 +1,62 @@
+name: Legal Persona Boundary
+
+on:
+  pull_request:
+    paths:
+      - 'auth/**'
+      - 'calendar/**'
+      - 'contacts/**'
+      - 'directory/**'
+      - 'email/**'
+      - 'files/**'
+      - 'groups/**'
+      - 'notifications/**'
+      - 'planner/**'
+      - 'search/**'
+      - 'teams/**'
+      - 'todo/**'
+      - 'index.js'
+      - 'policy.js'
+      - 'legal-tool-surface.lock.json'
+      - 'scripts/check-legal-tool-surface.js'
+      - 'tests/**'
+      - 'package.json'
+      - '.github/workflows/legal-draft-only.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'auth/**'
+      - 'calendar/**'
+      - 'contacts/**'
+      - 'directory/**'
+      - 'email/**'
+      - 'files/**'
+      - 'groups/**'
+      - 'notifications/**'
+      - 'planner/**'
+      - 'search/**'
+      - 'teams/**'
+      - 'todo/**'
+      - 'index.js'
+      - 'policy.js'
+      - 'legal-tool-surface.lock.json'
+      - 'scripts/check-legal-tool-surface.js'
+      - 'tests/**'
+      - 'package.json'
+      - '.github/workflows/legal-draft-only.yml'
+
+jobs:
+  legal-persona-boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Verify reviewed legal-persona surface
+        run: node scripts/check-legal-tool-surface.js
+      - name: Test Office policy boundary
+        run: npm test -- --runInBand
