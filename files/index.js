@@ -4,6 +4,7 @@
  */
 
 const { ensureAuthenticated } = require('../auth');
+const { enforceFilesPolicy } = require('../policy');
 const { callGraphAPI } = require('../utils/graph-api');
 const config = require('../config');
 const { safeTool } = require('../utils/errors');
@@ -106,8 +107,15 @@ async function handleFiles(args) {
         return await cleanupDownload(params);
       case 'delete':
         return await deleteFile(accessToken, params);
-      case 'share':
+      case 'share': {
+        // Sharing is an outbound path the mail fence never sees: an invitation
+        // emails the recipient, and the default scope mints an anonymous link.
+        const policyError = await enforceFilesPolicy({ operation, ...params });
+        if (policyError) {
+          return { content: [{ type: "text", text: policyError }] };
+        }
         return await shareFile(accessToken, params);
+      }
       case 'search':
         return await searchFiles(accessToken, params);
       case 'move':

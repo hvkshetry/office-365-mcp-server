@@ -11,7 +11,7 @@ const { callGraphAPI } = require('../utils/graph-api');
 const { safeTool } = require('../utils/errors');
 const { validateId } = require('../utils/validate');
 const config = require('../config');
-const { enforceMailPolicy, recordSideEffect } = require('../policy');
+const { enforceMailPolicy, recordSideEffect, recipientRestrictionActive, partitionRecipients } = require('../policy');
 
 // Submodule imports
 const { handleEmailSearch } = require('./search');
@@ -746,6 +746,55 @@ async function replyToEmail(accessToken, params) {
     }
     validateId(params.emailId, 'emailId');
 
+    // ---- Resolve, filter, pin -------------------------------------------
+    // `reply`/`replyAll` name no recipients in params: Graph expands the thread
+    // server-side, so the recipient fence in enforceMailPolicy() above sees an
+    // empty address list and passes. Resolve the real list here, drop anyone
+    // this persona may not address, and pin the survivors explicitly with
+    // replyAll turned OFF -- filtering while still calling replyAll would let
+    // Graph re-expand the thread and silently undo the filter.
+    let strippedRecipients = [];
+    if (recipientRestrictionActive()) {
+      const resolvePrefix = config.getMailboxPrefix(params.mailbox);
+      const [originalMessage, selfAddresses] = await Promise.all([
+        fetchReplySourceMessage(accessToken, resolvePrefix, params.emailId),
+        getMailboxOwnerAddresses(accessToken, params.mailbox)
+      ]);
+      const resolved = buildFallbackReplyRecipients(originalMessage, params, selfAddresses);
+      const to = partitionRecipients(resolved.toRecipients);
+      const cc = partitionRecipients(resolved.ccRecipients);
+      strippedRecipients = [...new Set([...to.removed, ...cc.removed])];
+
+      if (to.kept.length === 0) {
+        const reason = strippedRecipients.length
+          ? `Blocked by communication-agent policy: every recipient on this thread is outside `
+            + `this agent's allowed list (${strippedRecipients.join(', ')}). Nothing was sent.`
+          : 'Blocked by communication-agent policy: no allowed reply recipient could be '
+            + 'determined for this thread. Nothing was sent.';
+        await recordSideEffect('mail.reply', 'blocked', params.mailbox || null, {
+          reason,
+          emailId: params.emailId,
+          removed: strippedRecipients
+        });
+        return { content: [{ type: "text", text: reason }] };
+      }
+
+      params = {
+        ...params,
+        replyAll: false,
+        to: to.kept.map(r => r.emailAddress.address),
+        cc: cc.kept.length ? cc.kept.map(r => r.emailAddress.address) : undefined
+      };
+
+      if (strippedRecipients.length) {
+        await recordSideEffect('mail.reply', 'stripped', params.mailbox || null, {
+          emailId: params.emailId,
+          removed: strippedRecipients,
+          kept: [...params.to, ...(params.cc || [])]
+        });
+      }
+    }
+
     // Use comment (not message.body) so Graph preserves the quoted original message.
     // message.body replaces the entire reply body, wiping the original.
     const replyPayload = {
@@ -778,6 +827,15 @@ async function replyToEmail(accessToken, params) {
     if (Object.keys(messageOverrides).length > 0) {
       replyPayload.message = messageOverrides;
     }
+
+    // The agent is instructed to reply-all and never drop recipients, so a
+    // silent strip would train it on a false model and leave the removed party
+    // waiting for an answer that is never coming. Say so in the tool result.
+    const stripNotice = strippedRecipients.length
+      ? ` NOTE: ${strippedRecipients.length} recipient(s) outside your allowed list were removed `
+        + `before sending (${strippedRecipients.join(', ')}). They did NOT receive this reply — `
+        + `say so in the thread, or ask a person to forward it.`
+      : '';
 
     const prefix = config.getMailboxPrefix(params.mailbox);
     const fileAttachments = params.attachments && params.attachments.length > 0
@@ -819,10 +877,11 @@ async function replyToEmail(accessToken, params) {
         await recordSideEffect('mail.reply', 'success', params.mailbox || null, {
           emailId: params.emailId,
           replyAll: !!params.replyAll,
-          attachments: fileAttachments.length
+          attachments: fileAttachments.length,
+          strippedRecipients
         });
         return {
-          content: [{ type: "text", text: `Reply sent successfully with ${fileAttachments.length} attachment(s)! The reply is threaded under the original email.` }]
+          content: [{ type: "text", text: `Reply sent successfully with ${fileAttachments.length} attachment(s)! The reply is threaded under the original email.${stripNotice}` }]
         };
       }
 
@@ -840,10 +899,11 @@ async function replyToEmail(accessToken, params) {
       await recordSideEffect('mail.reply', 'success', params.mailbox || null, {
         emailId: params.emailId,
         replyAll: !!params.replyAll,
-        attachments: 0
+        attachments: 0,
+        strippedRecipients
       });
       return {
-        content: [{ type: "text", text: "Reply sent successfully! The reply is threaded under the original email." }]
+        content: [{ type: "text", text: `Reply sent successfully! The reply is threaded under the original email.${stripNotice}` }]
       };
     } catch (actionError) {
       if (!isReplyActionRoutingError(actionError)) {
@@ -866,7 +926,7 @@ async function replyToEmail(accessToken, params) {
         fallback: 'draft-send',
         content: [{
           type: "text",
-          text: `Reply sent successfully${attachMsg} via fallback: draft-send.`
+          text: `Reply sent successfully${attachMsg} via fallback: draft-send.${stripNotice}`
         }]
       };
     }
@@ -1310,6 +1370,42 @@ async function sendDraft(accessToken, params) {
       };
     }
     validateId(draftId, 'draftId');
+
+    // `send_draft` carries only a draftId -- the recipients live on the
+    // server-side draft, so the recipient fence in enforceMailPolicy() cannot
+    // see them. Resolve them here and refuse rather than strip: `draft` and
+    // `update_draft` are both fenced, so a draft that names someone outside the
+    // allowed list did not come from a policed path and should not be sent.
+    if (recipientRestrictionActive()) {
+      const draftMsg = await callGraphAPI(
+        accessToken,
+        'GET',
+        `${config.getMailboxPrefix(mailbox)}/messages/${draftId}`,
+        null,
+        { $select: 'toRecipients,ccRecipients,bccRecipients' }
+      );
+      const parts = [
+        partitionRecipients(draftMsg.toRecipients),
+        partitionRecipients(draftMsg.ccRecipients),
+        partitionRecipients(draftMsg.bccRecipients)
+      ];
+      const removed = [...new Set(parts.flatMap(x => x.removed))];
+      if (removed.length) {
+        const reason =
+          `Blocked by communication-agent policy: draft ${draftId} names recipient(s) `
+          + `outside this agent's allowed list (${removed.join(', ')}). Nothing was sent. `
+          + `Re-create the draft with allowed recipients.`;
+        await recordSideEffect('mail.send_draft', 'blocked', mailbox || null, { reason, draftId, removed });
+        return { content: [{ type: "text", text: reason }] };
+      }
+      if (parts.every(x => x.kept.length === 0)) {
+        const reason =
+          `Blocked by communication-agent policy: draft ${draftId} has no resolvable `
+          + `recipients. Nothing was sent.`;
+        await recordSideEffect('mail.send_draft', 'blocked', mailbox || null, { reason, draftId });
+        return { content: [{ type: "text", text: reason }] };
+      }
+    }
 
     await callGraphAPI(
       accessToken,

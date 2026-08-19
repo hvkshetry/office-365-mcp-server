@@ -11,6 +11,7 @@
  */
 
 const { ensureAuthenticated } = require('../../auth');
+const { enforceTeamsPolicy } = require('../../policy');
 const { callGraphAPI } = require('../../utils/graph-api');
 const config = require('../../config');
 
@@ -62,6 +63,21 @@ async function handleTeamsChat(args) {
     
     const accessToken = await ensureAuthenticated();
     
+    // Teams is a second delivery network the mail fence cannot see into: a chat
+    // or channel may contain external guests, and membership is not visible from
+    // these arguments. Gate the write capability itself.
+    const TEAMS_WRITES = new Set([
+      'create', 'update', 'delete',
+      'send_message', 'update_message', 'delete_message',
+      'add_member', 'remove_member'
+    ]);
+    if (TEAMS_WRITES.has(operation)) {
+      const policyError = await enforceTeamsPolicy({ operation, ...params });
+      if (policyError) {
+        return { content: [{ type: "text", text: policyError }] };
+      }
+    }
+
     switch (operation) {
       case 'list':
         return await listChats(accessToken, params);
