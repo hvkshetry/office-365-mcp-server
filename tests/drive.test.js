@@ -106,6 +106,48 @@ describe('Files Module', () => {
     });
   });
 
+  describe('binary upload operation', () => {
+    it('uses the requested drive root when parentPath is omitted', async () => {
+      callGraphAPI.mockResolvedValue({ id: 'file-fixture', name: 'report #1.bin', size: 4 });
+      await filesHandler({ operation: 'upload', fileName: 'report #1.bin', contentBase64: 'AAECAw==', driveId: 'drive-fixture' });
+      expect(callGraphAPI.mock.calls[0][2]).toBe('/drives/drive-fixture/root:/report%20%231.bin:/content');
+    });
+
+    it('rejects malformed base64 before making a request', async () => {
+      const result = await filesHandler({ operation: 'upload', fileName: 'fixture.bin', contentBase64: 'AAECAw=!' });
+      expect(result.content[0].text).toContain('strict RFC 4648 base64');
+      expect(callGraphAPI).not.toHaveBeenCalled();
+    });
+
+    it('decodes strict base64 before uploading binary content', async () => {
+      callGraphAPI.mockResolvedValue({
+        id: 'binary123',
+        name: 'drawing.dwg',
+        size: 4
+      });
+
+      const result = await filesHandler({
+        operation: 'upload',
+        fileName: 'drawing.dwg',
+        contentBase64: 'AAECAw=='
+      });
+
+      expect(result.content[0].text).toContain('drawing.dwg');
+      expect(callGraphAPI.mock.calls.at(-1)[3]).toEqual(Buffer.from([0, 1, 2, 3]));
+    });
+
+    it('rejects simultaneous text and binary upload bodies', async () => {
+      const result = await filesHandler({
+        operation: 'upload',
+        fileName: 'ambiguous.bin',
+        content: 'text',
+        contentBase64: 'dGV4dA=='
+      });
+
+      expect(result.content[0].text).toContain('exactly one');
+    });
+  });
+
   describe('download operation', () => {
     it('should return inline content for text-like files', async () => {
       callGraphAPI

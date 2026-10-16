@@ -54,6 +54,27 @@ function driveParentEndpoint(parentId, driveId) {
   return `/me/drive/items/${parentId}`;
 }
 
+function driveParentPathEndpoint(parentPath, driveId) {
+  const raw = (parentPath || '').trim();
+
+  // Already an endpoint: /me/drive/..., /drives/..., /sites/..., /groups/...
+  if (/^\/(me\/drive|drives|sites|groups|users)\b/.test(raw)) {
+    return raw;
+  }
+
+  let root = '/me/drive/root';
+  if (driveId) {
+    validateId(driveId, 'driveId');
+    root = `/drives/${driveId}/root`;
+  }
+
+  const relative = raw.replace(/^\/+/, '').replace(/\/+$/, '');
+  if (!relative) {
+    return root;
+  }
+  return `${root}:/${relative.split('/').map(encodeURIComponent).join('/')}:`;
+}
+
 /**
  * Unified files handler for all file operations
  */
@@ -120,6 +141,7 @@ async function listFiles(accessToken, params) {
     siteId,
     driveId,
     folderId,
+    parentPath,
     maxResults = 50
   } = params;
   
@@ -138,10 +160,14 @@ async function listFiles(accessToken, params) {
     endpoint = `/sites/${siteId}/drive/root`;
   } else if (driveId && folderId) {
     endpoint = `/drives/${driveId}/items/${folderId}`;
-  } else if (driveId) {
-    endpoint = `/drives/${driveId}/root`;
   } else if (folderId) {
     endpoint = `/me/drive/items/${folderId}`;
+  } else if (parentPath) {
+    // A caller who names a folder means that folder. Ignoring the name and listing the drive
+    // root instead answers a question nobody asked, and reads as an empty or wrong folder.
+    endpoint = driveParentPathEndpoint(parentPath, driveId);
+  } else if (driveId) {
+    endpoint = `/drives/${driveId}/root`;
   }
   
   const queryParams = {
@@ -232,24 +258,52 @@ async function uploadFile(accessToken, params) {
   const {
     fileName,
     content,
-    parentPath = '/me/drive/root',
+    contentBase64,
+    parentPath = '/',
     parentId,
     driveId,
     conflictBehavior = 'rename' // rename, replace, fail
   } = params;
   
-  if (!fileName || !content) {
+  const hasTextContent = typeof content === 'string' && content.length > 0;
+  const hasBase64Content = typeof contentBase64 === 'string' && contentBase64.length > 0;
+  if (!fileName || (!hasTextContent && !hasBase64Content)) {
     return {
       content: [{ 
         type: "text", 
-        text: "Missing required parameters: fileName and content" 
+        text: "Missing required parameters: fileName and exactly one of content or contentBase64"
       }]
     };
   }
+  if (hasTextContent && hasBase64Content) {
+    return {
+      content: [{
+        type: "text",
+        text: "Provide exactly one of content or contentBase64"
+      }]
+    };
+  }
+
+  let uploadContent = content;
+  if (hasBase64Content) {
+    if (contentBase64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(contentBase64)) {
+      return { content: [{ type: "text", text: "contentBase64 must be strict RFC 4648 base64" }] };
+    }
+    uploadContent = Buffer.from(contentBase64, 'base64');
+    if (uploadContent.length === 0 || uploadContent.toString('base64') !== contentBase64) {
+      return { content: [{ type: "text", text: "contentBase64 must be strict RFC 4648 base64" }] };
+    }
+  }
   
+  // Path-addressed upload: the base is either "<root>" or "<root>:/a/b:", and the filename is
+  // appended inside the same path segment in each case, which the two shapes spell differently.
+  const parentBase = driveParentPathEndpoint(parentPath, driveId);
+  const pathUploadEndpoint = parentBase.endsWith(':')
+    ? `${parentBase.slice(0, -1)}/${encodeURIComponent(fileName)}:/content`
+    : `${parentBase}:/${encodeURIComponent(fileName)}:/content`;
   const endpoint = parentId
-    ? `${driveParentEndpoint(parentId, driveId)}:/${fileName}:/content`
-    : `${parentPath}:/${fileName}:/content`;
+    ? `${driveParentEndpoint(parentId, driveId)}:/${encodeURIComponent(fileName)}:/content`
+    : pathUploadEndpoint;
   
   const queryParams = {
     '@microsoft.graph.conflictBehavior': conflictBehavior
@@ -260,7 +314,7 @@ async function uploadFile(accessToken, params) {
     accessToken,
     'PUT',
     endpoint,
-    content,
+    uploadContent,
     queryParams,
     {
       'Content-Type': 'application/octet-stream'
@@ -669,7 +723,7 @@ async function searchFiles(accessToken, params) {
   return {
     content: [{
       type: "text",
-      text: `${header}:\n\n${results}${note}`
+      text: `${header}:\n\n${results}${note}\n\nSource: Microsoft Search index (asynchronously crawled); recent changes and timestamps may lag. Use operation "list" on a known folder to check its current contents.`
     }]
   };
 }
@@ -680,20 +734,28 @@ async function searchFiles(accessToken, params) {
 async function moveFile(accessToken, params) {
   const { fileId, destinationId, newName, driveId } = params;
 
-  if (!fileId || !destinationId) {
+  if (!fileId) {
+    return {
+      content: [{ type: "text", text: "Missing required parameter: fileId" }]
+    };
+  }
+
+  // A rename is a move that changes only the name. Demanding a destination for one forces the
+  // caller to look up the folder the item is already in, and to pass it back unchanged.
+  if (!destinationId && !newName) {
     return {
       content: [{
         type: "text",
-        text: "Missing required parameters: fileId and destinationId"
+        text: "Nothing to do: pass destinationId to move the item, newName to rename it, or both."
       }]
     };
   }
 
-  const body = {
-    parentReference: {
-      id: destinationId
-    }
-  };
+  const body = {};
+
+  if (destinationId) {
+    body.parentReference = { id: destinationId };
+  }
 
   if (newName) {
     body.name = newName;
@@ -709,7 +771,7 @@ async function moveFile(accessToken, params) {
   return {
     content: [{ 
       type: "text", 
-      text: `File moved successfully!\nNew location: ${response.parentReference.path}/${response.name}` 
+      text: `File ${destinationId ? "moved" : "renamed"} successfully!\nNew location: ${response.parentReference?.path ?? ""}/${response.name}`
     }]
   };
 }
@@ -759,7 +821,7 @@ async function copyFile(accessToken, params) {
  * Create a folder
  */
 async function createFolder(accessToken, params) {
-  const { name, parentId, parentPath = '/me/drive/root', driveId } = params;
+  const { name, parentId, parentPath = '/', driveId } = params;
   
   if (!name) {
     return {
@@ -772,7 +834,7 @@ async function createFolder(accessToken, params) {
   
   const endpoint = parentId
     ? `${driveParentEndpoint(parentId, driveId)}/children`
-    : `${parentPath}/children`;
+    : `${driveParentPathEndpoint(parentPath, driveId)}/children`;
   
   const body = {
     name: name,
@@ -790,7 +852,7 @@ async function createFolder(accessToken, params) {
   return {
     content: [{ 
       type: "text", 
-      text: `Folder created successfully!\nName: ${response.name}\nID: ${response.id}\nPath: ${response.parentReference.path}/${response.name}` 
+      text: `Folder created successfully!\nName: ${response.name}\nID: ${response.id}\nPath: ${response.parentReference.path}/${response.name}`
     }]
   };
 }
@@ -818,6 +880,7 @@ const filesTools = [
         // Upload parameters
         fileName: { type: "string", description: "Name for uploaded file" },
         content: { type: "string", description: "File content to upload" },
+        contentBase64: { type: "string", description: "Strict RFC 4648 base64 for binary file content; mutually exclusive with content" },
         parentPath: { type: "string", description: "Parent folder path" },
         parentId: { type: "string", description: "Parent folder ID" },
         conflictBehavior: { 
@@ -1048,4 +1111,4 @@ const filesTools = [
   }
 ];
 
-module.exports = { filesTools };
+module.exports = { filesTools, driveParentPathEndpoint };
