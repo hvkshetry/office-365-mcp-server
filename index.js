@@ -69,7 +69,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: TOOLS.map(tool => ({
       name: tool.name,
       description: tool.description,
-      inputSchema: tool.inputSchema
+      inputSchema: tool.inputSchema,
+      ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {})
     }))
   };
 });

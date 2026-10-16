@@ -46,7 +46,11 @@ function digest(value) {
 function currentSurface() {
   const tools = modules
     .flat()
-    .map(tool => ({ name: tool.name, input_schema: tool.inputSchema || {} }))
+    .map(tool => ({
+      name: tool.name,
+      input_schema: tool.inputSchema || {},
+      ...(tool.outputSchema ? { output_schema: tool.outputSchema } : {})
+    }))
     .sort((left, right) => left.name.localeCompare(right.name));
   const reviewed = {};
   for (const [name, operations] of Object.entries(LEGAL_TOOL_MANIFEST)) {

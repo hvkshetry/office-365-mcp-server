@@ -10,6 +10,7 @@ const { callGraphAPI } = require('../utils/graph-api');
 const { validateId } = require('../utils/validate');
 const config = require('../config');
 const { getFolderIdByName } = require('./folders');
+const { withMailStructuredContent } = require('./results');
 
 /**
  * Unified email search handler - single powerful search with automatic optimization
@@ -73,12 +74,23 @@ async function handleEmailSearch(args) {
       if (usesKqlOnly) {
         const kqlOnly = buildKQLQuery({ query: '', from, to, subject, hasAttachments, isRead, importance, startDate, endDate });
         console.error(`Empty query with $search-only predicate(s), using $search: ${kqlOnly}`);
-        return await searchUsingGraphSearch(accessToken, {
-          query: kqlOnly,
-          endpoint: searchEndpoint,
-          maxResults,
-          allowEmpty: true
-        });
+        try {
+          return await searchUsingGraphSearch(accessToken, {
+            query: kqlOnly,
+            endpoint: searchEndpoint,
+            maxResults,
+            allowEmpty: true
+          });
+        } catch (error) {
+          // There is no second tier for these predicates — Graph rejects from/to/hasAttachments/
+          // importance in a $filter. Say that, rather than letting a transient 503 surface as a
+          // bare error the caller cannot act on or distinguish from an empty mailbox.
+          console.error('Graph $search failed on a $search-only predicate set:', error.message);
+          return { isError: true, content: [{ type: "text", text:
+            `Email search failed (${error.message}). from/to/hasAttachments/importance `
+            + `cannot fall back to a subject filter, so no second attempt was made. This is NOT `
+            + `evidence the mailbox is empty; retry, or search by a distinctive keyword instead.` }] };
+        }
       }
       console.error('Empty query detected, using $filter directly');
       return await searchUsingFilter(accessToken, {
@@ -108,24 +120,8 @@ async function handleEmailSearch(args) {
     console.error(`Unified search - KQL Query: ${kqlQuery}`);
     console.error(`Search endpoint: ${searchEndpoint}`);
 
-    // Early exit to $filter for date-scoped searches ONLY if not KQL format and no
-    // $search-only predicate is present (those must not touch $filter — see usesKqlOnly).
-    if ((startDate || endDate) && !isKQLFormat(query || '') && !usesKqlOnly) {
-      console.error('Date filters detected with non-KQL query, using $filter directly');
-      return await searchUsingFilter(accessToken, {
-        query,
-        from,
-        to,
-        subject,
-        hasAttachments,
-        isRead,
-        importance,
-        startDate,
-        endDate,
-        endpoint: searchEndpoint,
-        maxResults
-      });
-    }
+    // Dates belong in the KQL expression too. Routing text + dates directly to
+    // $filter silently discards body matches before a full-text search is tried.
 
     // Three-tier execution strategy
     // External mailbox: skip Tier 1 (/search/query) which doesn't scope to other users
@@ -157,47 +153,44 @@ async function handleEmailSearch(args) {
     } catch (error) {
       console.error('Graph $search failed, falling back to $filter:', error.message);
 
+      // Why Tier 2 gave up, carried into the Tier 3 result text. Silently degrading from a
+      // body-capable search to a subject-only one produces an answer that LOOKS authoritative
+      // and is not: a caller reads "no emails found" as "the mailbox has nothing", when in
+      // fact bodies were never read. A transient 401/429/5xx must not be indistinguishable
+      // from a genuine empty mailbox.
+      const degradedBecause = error && error.isEmptyResult
+        ? '$search matched nothing'
+        : `$search failed (${(error && error.message) || 'unknown error'})`;
+
       // from/to/hasAttachments/importance cannot fall back to $filter (Graph 400); a $search
       // error here means no usable result, so return empty rather than a mis-broadened $filter.
-      if (usesKqlOnly) {
-        return { content: [{ type: "text", text: "No emails found matching your search." }] };
+      if (usesKqlOnly || isKQLFormat(query || '')) {
+        return { isError: !error.isEmptyResult, content: [{ type: "text", text:
+          `Search returned no usable results (${degradedBecause}; KQL or from/to/hasAttachments/`
+          + `importance predicates cannot fall back to a subject filter, so no second attempt was made).`
+          + (error.isEmptyResult ? '' : ' The mailbox search failed; this is not evidence of absence.') }] };
       }
 
       // Tier 3: Fall back to $filter
-      if (isKQLFormat(query || '')) {
-        const simplifiedQuery = (query || '').replace(/\s+(OR|AND|NOT)\s+/gi, ' ').trim();
-        return await searchUsingFilter(accessToken, {
-          query: simplifiedQuery,
-          from,
-          to,
-          subject,
-          hasAttachments,
-          isRead,
-          importance,
-          startDate,
-          endDate,
-          endpoint: searchEndpoint,
-          maxResults
-        });
-      } else {
-        return await searchUsingFilter(accessToken, {
-          query,
-          from,
-          to,
-          subject,
-          hasAttachments,
-          isRead,
-          importance,
-          startDate,
-          endDate,
-          endpoint: searchEndpoint,
-          maxResults
-        });
-      }
+      return await searchUsingFilter(accessToken, {
+        query,
+        from,
+        to,
+        subject,
+        hasAttachments,
+        isRead,
+        importance,
+        startDate,
+        endDate,
+        endpoint: searchEndpoint,
+        maxResults,
+        degradedBecause
+      });
     }
   } catch (error) {
     console.error('Error in unified email search:', error);
     return {
+      isError: true,
       content: [{ type: "text", text: `Error in email search: ${error.message}` }]
     };
   }
@@ -255,7 +248,7 @@ function buildKQLQuery(params) {
 /**
  * Check if query contains KQL operators
  */
-function isKQLFormat(query) {
+function isKQLFormat(query = '') {
   const kqlOperators = [
     ':',      // Property separator
     ' AND ',  // Boolean AND
@@ -360,30 +353,31 @@ async function searchUsingMicrosoftSearchAPI(accessToken, params) {
   const hits = response.value[0]?.hitsContainers[0]?.hits || [];
 
   if (hits.length === 0) {
-    return {
-      content: [{ type: "text", text: "No emails found matching your search." }]
-    };
+    // Fall through to the next tier rather than terminating. Tier 1 only runs for
+    // "complex" (e.g. multi-word) queries, so returning a terminal empty result here
+    // meant multi-word searches never reached the $search or $filter tiers at all,
+    // while single-word searches — which skip Tier 1 — found matches fine. The caller
+    // saw a confident "No emails found" for a mailbox that did contain the message.
+    // Tier 2 does the same thing, and the caller already catches and falls back.
+    console.error('Microsoft Search API returned 0 hits, falling back');
+    throw new Error('No results from Microsoft Search API, trigger fallback');
   }
 
-  const emailsList = hits.map(hit => {
-    const resource = hit.resource;
-    const attachments = resource.hasAttachments ? ' 📎' : '';
-    const emailId = resource.id || hit.hitId || 'Not available';
-    const fromAddress = resource.from?.emailAddress?.address || resource.from || 'Unknown sender';
-    const importance = resource.importance ? ` [${resource.importance}]` : '';
-    const unread = resource.isRead === false ? ' *' : '';
-
-    return `- ${resource.subject}${attachments}${importance}${unread}\n  From: ${fromAddress}\n  Date: ${new Date(resource.receivedDateTime).toLocaleString()}\n  ID: ${emailId}\n`;
-  }).join('\n');
+  const emails = hits.map(hit => summarizeEmail(hit.resource, hit.hitId));
+  const emailsList = emails.map((email, index) => formatSearchEmail(email, hits[index].resource)).join('\n');
 
   const sortNote = useRelevance ? ' (sorted by relevance)' : ' (sorted by date)';
+  const container = response.value[0]?.hitsContainers[0];
+  const coverage = searchCoverage('microsoft-search', hits.length, Math.min(maxResults, 1000),
+    !!container?.moreResultsAvailable || container?.total > hits.length);
 
-  return {
+  return withMailStructuredContent({
+    structuredContent: { ...coverage, emails },
     content: [{
       type: "text",
-      text: `Found ${hits.length} emails${sortNote}:\n\n${emailsList}`
+      text: `Found ${hits.length} emails${sortNote}:\n${coverage.note}\n\n${emailsList}`
     }]
-  };
+  });
 }
 
 /**
@@ -393,7 +387,9 @@ async function searchUsingGraphSearch(accessToken, params) {
   const { query, endpoint, maxResults, allowEmpty = false, mailbox } = params;
 
   const queryParams = {
-    $search: `"${query}"`,
+    // Quote the OData string AND escape its inner KQL phrase quotes. Merely
+    // wrapping a query such as subject:"Banthar" produces an invalid request.
+    $search: JSON.stringify(query),
     $top: Math.min(maxResults, 250),
     $select: config.EMAIL_SELECT_FIELDS
   };
@@ -412,28 +408,29 @@ async function searchUsingGraphSearch(accessToken, params) {
       // (a $filter on them triggers a Graph "too complex" 400), so there is no $filter fallback
       // to attempt — a genuine empty result is the answer.
       return {
-        content: [{ type: "text", text: "No emails found matching your search." }]
+        content: [{ type: "text", text: "No emails found matching your search (bodies were searched)." }]
       };
     }
     console.error('Graph $search returned 0 results, falling back to $filter');
-    throw new Error('No results from $search, trigger fallback');
+    // Flagged so the caller can tell "Graph looked and found nothing" apart from "Graph
+    // errored and we never looked". Both used to arrive as the same bare throw.
+    const empty = new Error('No results from $search, trigger fallback');
+    empty.isEmptyResult = true;
+    throw empty;
   }
 
-  const emailsList = response.value.map(email => {
-    const attachments = email.hasAttachments ? ' 📎' : '';
-    const importance = email.importance !== 'normal' ? ` [${email.importance}]` : '';
-    const unread = !email.isRead ? ' *' : '';
-    const fromAddress = email.from?.emailAddress?.address || email.from?.address || 'Unknown sender';
+  const emails = response.value.map(email => summarizeEmail(email));
+  const emailsList = emails.map((email, index) => formatSearchEmail(email, response.value[index])).join('\n');
 
-    return `- ${email.subject || '(No subject)'}${attachments}${importance}${unread}\n  From: ${fromAddress}\n  Date: ${new Date(email.receivedDateTime).toLocaleString()}\n  ID: ${email.id}\n`;
-  }).join('\n');
-
-  return {
+  const coverage = searchCoverage('graph-search', response.value.length, queryParams.$top,
+    !!response['@odata.nextLink']);
+  return withMailStructuredContent({
+    structuredContent: { ...coverage, emails },
     content: [{
       type: "text",
-      text: `Found ${response.value.length} emails:\n\n${emailsList}`
+      text: `Found ${response.value.length} emails:\n${coverage.note}\n\n${emailsList}`
     }]
-  };
+  });
 }
 
 /**
@@ -453,16 +450,27 @@ async function searchUsingFilter(accessToken, params) {
     endDate,
     endpoint,
     maxResults
-  , mailbox } = params;
+  , mailbox, degradedBecause } = params;
 
   let filters = [];
 
+  // Tokenise multi-word queries. `contains()` is a literal substring match, so a
+  // multi-word query used whole ("Air Products PRISM membrane") only matches a subject
+  // containing that exact run of characters — which almost never happens, and the caller
+  // gets a bare "No emails found" that reads like an empty mailbox. AND the terms
+  // instead so word order and intervening words don't matter.
+  const termFilters = (text) =>
+    String(text)
+      .split(/\s+/)
+      .filter(Boolean)
+      .map(t => `contains(subject, '${t.replace(/'/g, "''")}')`);
+
   if (query && query !== '' && query !== '*' && !subject) {
-    filters.push(`contains(subject, '${query}')`);
+    filters.push(...termFilters(query));
   }
 
   if (subject) {
-    filters.push(`contains(subject, '${subject}')`);
+    filters.push(...termFilters(subject));
   }
 
   if (isRead !== undefined) {
@@ -511,25 +519,71 @@ async function searchUsingFilter(accessToken, params) {
   );
 
   if (!response.value || response.value.length === 0) {
+    // Say what was actually searched. This tier matches on SUBJECT only, so a miss here
+    // does not mean the mailbox has nothing — it means no subject line matched. Without
+    // this, callers read a bare "No emails found" as an authoritative empty result.
+    const searched = filterQuery
+      ? `subject-line match on: ${filterQuery}`
+      : 'no text predicate';
+    const why = degradedBecause ? `\nFell back because ${degradedBecause}.` : '';
     return {
-      content: [{ type: "text", text: "No emails found matching your search." }]
+      content: [{
+        type: "text",
+        text: `No emails found (filter fallback searched SUBJECT LINES ONLY — ${searched}).${why}\n`
+            + `Message bodies were NOT searched, so this is not evidence the mailbox has nothing. `
+            + `Try a single distinctive keyword, or the 'from' parameter to search by sender.`
+      }]
     };
   }
 
-  const emailsList = response.value.map(email => {
-    const attachments = email.hasAttachments ? ' 📎' : '';
-    const importance = email.importance !== 'normal' ? ` [${email.importance}]` : '';
-    const unread = !email.isRead ? ' *' : '';
-    const fromAddress = email.from?.emailAddress?.address || email.from?.address || 'Unknown sender';
+  const emails = response.value.map(email => summarizeEmail(email));
+  const emailsList = emails.map((email, index) => formatSearchEmail(email, response.value[index])).join('\n');
 
-    return `- ${email.subject || '(No subject)'}${attachments}${importance}${unread}\n  From: ${fromAddress}\n  Date: ${new Date(email.receivedDateTime).toLocaleString()}\n  ID: ${email.id}\n`;
-  }).join('\n');
-
-  return {
+  const why = degradedBecause ? ` — fell back because ${degradedBecause}` : '';
+  const coverage = searchCoverage('subject-filter', response.value.length, queryParams.$top,
+    !!response['@odata.nextLink']);
+  return withMailStructuredContent({
+    structuredContent: { ...coverage, emails },
     content: [{
       type: "text",
-      text: `Found ${response.value.length} emails (using filter fallback):\n\n${emailsList}`
+      text: `Found ${response.value.length} emails (filter fallback, SUBJECT LINES ONLY${why}).\n`
+          + `Message bodies were NOT searched, so matches that appear only in a body are missing `
+          + `from this list.\n${coverage.note}\n\n${emailsList}`
     }]
+  });
+}
+
+function summarizeEmail(email, fallbackId) {
+  const from = email.from?.emailAddress?.address
+    || (typeof email.from === 'string' ? email.from : null)
+    || 'Unknown sender';
+  return {
+    id: email.id || fallbackId || 'Not available',
+    subject: email.subject || '(No subject)',
+    from,
+    receivedDateTime: email.receivedDateTime || null,
+    hasAttachments: !!email.hasAttachments
+  };
+}
+
+function formatSearchEmail(email, source) {
+  const attachments = email.hasAttachments ? ' 📎' : '';
+  const importance = source.importance ? ` [${source.importance}]` : '';
+  const unread = source.isRead === false ? ' *' : '';
+  const date = email.receivedDateTime ? new Date(email.receivedDateTime).toLocaleString() : 'Unknown date';
+  return `- ${email.subject}${attachments}${importance}${unread}\n  From: ${email.from}\n  Date: ${date}\n  ID: ${email.id}\n`;
+}
+
+// A result page is not a completeness claim. Graph message $search also has
+// a service ceiling of 1,000 results even when the mailbox has more matches.
+function searchCoverage(method, returned, pageLimit, hasMore) {
+  const limited = hasMore || returned >= pageLimit;
+  return {
+    method, returned, pageLimit, hasMore, limited,
+    serviceLimit: method === 'graph-search' ? 1000 : null,
+    note: limited
+      ? `PARTIAL SEARCH: returned one page (limit ${pageLimit}); additional matches may exist. Narrow the date range or query before claiming completeness.`
+      : 'One result page returned; search-index results are not a mailbox completeness guarantee.'
   };
 }
 
@@ -542,7 +596,7 @@ async function searchEmailsBasic(accessToken, params) {
   if (subject) searchQuery = `subject:${subject} AND ${searchQuery}`;
 
   const queryParams = {
-    $search: `"${searchQuery}"`,
+    $search: JSON.stringify(searchQuery),
     $top: maxResults,
     $select: config.EMAIL_SELECT_FIELDS
   };
@@ -561,11 +615,8 @@ async function searchEmailsBasic(accessToken, params) {
     };
   }
 
-  const emailsList = response.value.map(email => {
-    const attachments = email.hasAttachments ? ' 📎' : '';
-    const fromAddress = email.from?.emailAddress?.address || email.from?.address || 'Unknown sender';
-    return `- ${email.subject || '(No subject)'}${attachments}\n  From: ${fromAddress}\n  Date: ${new Date(email.receivedDateTime).toLocaleString()}\n  ID: ${email.id}\n`;
-  }).join('\n');
+  const emails = response.value.map(email => summarizeEmail(email));
+  const emailsList = emails.map((email, index) => formatSearchEmail(email, response.value[index])).join('\n');
 
   return {
     content: [{
@@ -664,11 +715,8 @@ async function searchEmailsSimple(accessToken, params) {
     };
   }
 
-  const emailsList = response.value.map(email => {
-    const attachments = email.hasAttachments ? ' 📎' : '';
-    const fromAddress = email.from?.emailAddress?.address || email.from?.address || 'Unknown sender';
-    return `- ${email.subject || '(No subject)'}${attachments}\n  From: ${fromAddress}\n  Date: ${new Date(email.receivedDateTime).toLocaleString()}\n  ID: ${email.id}\n`;
-  }).join('\n');
+  const emails = response.value.map(email => summarizeEmail(email));
+  const emailsList = emails.map((email, index) => formatSearchEmail(email, response.value[index])).join('\n');
 
   return {
     content: [{

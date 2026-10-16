@@ -526,6 +526,10 @@ function formatSmartResults(data) {
     output += '\nNo results found. Try adjusting your search query.\n';
   }
   
+  output += '\nSource: Microsoft Search index (asynchronously crawled). '
+         + 'Recently changed items may not be indexed yet; a miss is not proof of absence. '
+         + 'For current contents of a known folder, use files { operation: "list" }.\n';
+
   return {
     content: [{ type: "text", text: output }],
     metadata: { totalCount, aggregations, suggestions }

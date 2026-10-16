@@ -15,6 +15,7 @@ const { enforceMailPolicy, recordSideEffect } = require('../policy');
 
 // Submodule imports
 const { handleEmailSearch } = require('./search');
+const { mailOutputSchema, withMailStructuredContent } = require('./results');
 const { handleEmailMove, handleEmailFolder } = require('./folders');
 const { handleEmailRules } = require('./rules');
 const { handleEmailCategories } = require('./categories');
@@ -1480,9 +1481,12 @@ const emailTools = [
       },
       required: ["operation"]
     },
-    handler: safeTool('mail', handleMail)
+    outputSchema: mailOutputSchema,
+    handler: async args => withMailStructuredContent(await safeMailHandler(args))
   }
 ];
+
+const safeMailHandler = safeTool('mail', handleMail);
 
 /**
  * Render an email body as readable text.
