@@ -418,15 +418,23 @@ async function readEmail(accessToken, params) {
     }
   );
 
-  let emailContent = `Subject: ${response.subject}\n`;
-  emailContent += `From: ${response.from.emailAddress.name} <${response.from.emailAddress.address}>\n`;
-  emailContent += `To: ${response.toRecipients.map(r => `${r.emailAddress.name} <${r.emailAddress.address}>`).join(', ')}\n`;
+  // Drafts carry no `from` and may carry no recipients yet, so every field
+  // here has to tolerate being absent.
+  const formatRecipient = (r) => {
+    const name = r.emailAddress?.name || r.name;
+    const address = r.emailAddress?.address || r.address || 'Unknown';
+    return name ? `${name} <${address}>` : address;
+  };
+
+  let emailContent = `Subject: ${response.subject || '(No subject)'}\n`;
+  emailContent += `From: ${response.from ? formatRecipient(response.from) : '(Draft - not yet sent)'}\n`;
+  emailContent += `To: ${(response.toRecipients || []).map(formatRecipient).join(', ') || '(No recipients)'}\n`;
   if (response.ccRecipients && response.ccRecipients.length > 0) {
-    emailContent += `CC: ${response.ccRecipients.map(r => `${r.emailAddress.name} <${r.emailAddress.address}>`).join(', ')}\n`;
+    emailContent += `CC: ${response.ccRecipients.map(formatRecipient).join(', ')}\n`;
   }
-  emailContent += `Date: ${new Date(response.receivedDateTime).toLocaleString()}\n`;
+  emailContent += `Date: ${response.receivedDateTime ? new Date(response.receivedDateTime).toLocaleString() : '(Not sent)'}\n`;
   emailContent += `Has Attachments: ${response.hasAttachments ? 'Yes' : 'No'}\n\n`;
-  emailContent += `Body:\n${response.body.content}`;
+  emailContent += `Body:\n${renderEmailBody(response.body)}`;
 
   // List attachment metadata (no download — use get_attachment to download specific files)
   if (response.attachments && response.attachments.length > 0) {
@@ -1150,18 +1158,43 @@ async function updateDraft(accessToken, params) {
       }));
     }
 
-    const response = await callGraphAPI(
-      accessToken,
-      'PATCH',
-      `${config.getMailboxPrefix(mailbox)}/messages/${draftId}`,
-      updateMessage,
-      null
-    );
+    const prefix = config.getMailboxPrefix(mailbox);
+
+    // Graph rejects `attachments` inside a message PATCH; each one has to be
+    // POSTed to the draft's attachments collection separately.
+    const fileAttachments = updateParams.attachments && updateParams.attachments.length > 0
+      ? buildFileAttachments(updateParams.attachments)
+      : [];
+
+    let response = { id: draftId, subject: updateParams.subject };
+    if (Object.keys(updateMessage).length > 0) {
+      response = await callGraphAPI(
+        accessToken,
+        'PATCH',
+        `${prefix}/messages/${draftId}`,
+        updateMessage,
+        null
+      );
+    }
+
+    for (const attachment of fileAttachments) {
+      await callGraphAPI(
+        accessToken,
+        'POST',
+        `${prefix}/messages/${draftId}/attachments`,
+        attachment,
+        null
+      );
+    }
+
+    const attachmentNote = fileAttachments.length > 0
+      ? `\nAttachments added: ${fileAttachments.length}`
+      : '';
 
     return {
       content: [{
         type: "text",
-        text: `Draft updated successfully!\nDraft ID: ${response.id}\nSubject: ${response.subject || '(No subject)'}`
+        text: `Draft updated successfully!\nDraft ID: ${response.id}\nSubject: ${response.subject || '(No subject)'}${attachmentNote}`
       }]
     };
   } catch (error) {
@@ -1247,7 +1280,7 @@ async function listDrafts(accessToken, params) {
     }
 
     const draftsList = response.value.map((draft, index) => {
-      const toRecipients = draft.toRecipients?.map(r => r.emailAddress.address).join(', ') || '(No recipients)';
+      const toRecipients = draft.toRecipients?.map(r => r.emailAddress?.address || r.address).filter(Boolean).join(', ') || '(No recipients)';
       const attachments = draft.hasAttachments ? ' 📎' : '';
       return `${index + 1}. ${draft.subject || '(No subject)'}${attachments}
    To: ${toRecipients}
@@ -1409,7 +1442,7 @@ const emailTools = [
         attachments: {
           type: "array",
           items: { type: "string" },
-          description: "Local file paths to attach (for send/reply/draft). Files must be < 3 MB each."
+          description: "Local file paths to attach (for send/reply/draft/update_draft). Files must be < 3 MB each. On update_draft these are added to the existing draft, not replaced."
         },
         draftId: { type: "string", description: "Draft ID (for update_draft, send_draft)" },
         // Search parameters
@@ -1451,4 +1484,38 @@ const emailTools = [
   }
 ];
 
-module.exports = { emailTools };
+/**
+ * Render an email body as readable text.
+ *
+ * Outlook HTML bodies routinely run 50-70 KB of style blocks, MSO conditionals and
+ * inline attributes wrapping a few hundred words. Returning that raw made ordinary
+ * emails overflow the caller's token budget, so a routine "read this email" failed on
+ * message size alone. Strip to text and keep the raw HTML out of the transcript.
+ */
+function renderEmailBody(body) {
+  if (!body || !body.content) return '(empty body)';
+  if (String(body.contentType).toLowerCase() !== 'html') return body.content;
+
+  const text = body.content
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<(script|style|head)[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<\/(p|div|tr|li|h[1-6])>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;?/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/[ \t]+/g, ' ')
+    // Trim each line BEFORE collapsing blank runs -- otherwise space-only lines survive
+    // the collapse and only become empty afterwards, leaving the wall of whitespace.
+    .split('\n').map((l) => l.trim()).join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  return text || '(no text content)';
+}
+
+module.exports = { emailTools, renderEmailBody };
