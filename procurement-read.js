@@ -81,7 +81,17 @@ async function handler(params) {
         signal: AbortSignal.timeout(30000)
       });
       if (response.status !== 302 || !response.headers.get('location')) {
-        throw new Error(`Content download location unavailable (${response.status})`);
+        const body = await response.json().catch(() => ({}));
+        if (params.operation === 'version_content' && response.status === 400 &&
+            body.error?.code === 'invalidRequest' &&
+            body.error?.message === 'You cannot get the content of the current version.') {
+          const data = { current_version: true };
+          return { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data };
+        }
+        const error = new Error('Content download location unavailable');
+        error.statusCode = response.status;
+        error.code = body.error?.code || 'content_download_unavailable';
+        throw error;
       }
       const data = { download_url: response.headers.get('location') };
       return { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data };
