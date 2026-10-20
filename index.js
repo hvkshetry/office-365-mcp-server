@@ -40,7 +40,8 @@ console.error(`Token path: ${config.AUTH_CONFIG.tokenStorePath}`);
 console.error(`Token exists: ${require('fs').existsSync(config.AUTH_CONFIG.tokenStorePath)}`);
 
 // Combine all tools
-const TOOLS = [
+const ALL_TOOLS = [
+  require('./procurement-read').tool,
   ...authTools,
   ...calendarTools,
   ...emailTools,
@@ -54,6 +55,10 @@ const TOOLS = [
   ...groupsTools,
   ...directoryTools
 ];
+// A dedicated collection process retains the normal delegated credential while
+// exposing no mail send, file mutation, arbitrary Graph request or other tool.
+const TOOLS = process.env.OFFICE_TOOL_PROFILE === 'procurement-read'
+  ? ALL_TOOLS.filter(tool => tool.name === 'procurement_read') : ALL_TOOLS;
 
 // Create server with tools capabilities
 // SDK handles initialize and ping automatically via setRequestHandler

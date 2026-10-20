@@ -11,7 +11,7 @@ const config = require('../config');
  * @param {string} [tokenPath] - Token file to refresh (defaults to the primary store)
  * @returns {Promise<object>} - New token data including access_token and refresh_token
  */
-async function refreshAccessToken(tokenPath = config.AUTH_CONFIG.tokenStorePath) {
+async function refreshAccessTokenUnlocked(tokenPath = config.AUTH_CONFIG.tokenStorePath) {
   console.error('[AUTO-REFRESH] Starting token refresh process');
 
   try {
@@ -116,6 +116,45 @@ async function refreshAccessToken(tokenPath = config.AUTH_CONFIG.tokenStorePath)
   } catch (error) {
     console.error('[AUTO-REFRESH] Error in refresh process:', error);
     throw error;
+  }
+}
+
+// All Office subprocesses share this cache. A process lock prevents concurrent
+// refreshes from overwriting each other's replacement tokens or temporary file.
+async function refreshAccessToken(tokenPath = config.AUTH_CONFIG.tokenStorePath) {
+  const lockPath = tokenPath + '.refresh-lock';
+  const deadline = Date.now() + 60000;
+  let acquired = false;
+  while (!acquired && Date.now() < deadline) {
+    try {
+      fs.mkdirSync(lockPath, { mode: 0o700 });
+      acquired = true;
+      fs.writeFileSync(require('path').join(lockPath, 'pid'), String(process.pid), { mode: 0o600 });
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      try {
+        const pid = Number(fs.readFileSync(require('path').join(lockPath, 'pid'), 'utf8'));
+        if (!Number.isInteger(pid) || pid <= 0) throw new Error('Invalid refresh lock');
+        try { process.kill(pid, 0); }
+        catch (probe) {
+          if (probe.code === 'ESRCH') fs.rmSync(lockPath, { recursive: true, force: true });
+        }
+      } catch (probe) {
+        if (probe.code === 'ENOENT' && fs.existsSync(lockPath) &&
+            Date.now() - fs.statSync(lockPath).mtimeMs > 120000) {
+          fs.rmSync(lockPath, { recursive: true, force: true });
+        }
+      }
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+  }
+  if (!acquired) throw new Error('Office token refresh is busy; retry collection');
+  try {
+    const current = JSON.parse(fs.readFileSync(tokenPath, 'utf8'));
+    if (current.access_token && current.expires_at > Date.now() + 300000) return current;
+    return await refreshAccessTokenUnlocked(tokenPath);
+  } finally {
+    fs.rmSync(lockPath, { recursive: true, force: true });
   }
 }
 
