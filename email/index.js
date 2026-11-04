@@ -882,11 +882,65 @@ async function replyToEmail(accessToken, params) {
   }
 }
 
+// draft_reply_all acts on exactly these parameters. Anything else the caller names is refused by name: the handler
+// used to post only { comment } to createReplyAll, so cc (and bcc, to, subject ...) vanished without a word.
+const DRAFT_REPLY_ALL_PARAMS = new Set(['emailId', 'body', 'mailbox', 'attachments', 'cc', 'bcc', 'replyAll']);
+
+function isPassed(value) {
+  if (value === undefined || value === null || value === '') return false;
+  return !(Array.isArray(value) && value.length === 0);
+}
+
+function draftReplyAllRefusal(params) {
+  const unsupported = Object.keys(params || {})
+    .filter(key => !DRAFT_REPLY_ALL_PARAMS.has(key) && isPassed(params[key]));
+  if (params?.replyAll === false) unsupported.push('replyAll=false (draft_reply_all is always reply-all)');
+  if (unsupported.length === 0) return null;
+  return `draft_reply_all does not support: ${unsupported.join(', ')}. Nothing was created. It takes emailId, body, `
+    + 'mailbox, attachments, cc and bcc (cc/bcc are ADDED to the reply-all recipients); change To, the subject or '
+    + 'remove a recipient afterwards with update_draft on the returned draftId.';
+}
+
+// Add the caller's cc/bcc to the recipients the reply-all draft already carries (never drop one: email-formatting,
+// "never drop recipients"), de-duplicated case-insensitively against To, Cc and Bcc, then PATCH the draft once.
+async function addReplyAllDraftRecipients(accessToken, prefix, draft, params) {
+  if (!isPassed(params.cc) && !isPassed(params.bcc)) return null;
+  const current = (Array.isArray(draft.toRecipients) && Array.isArray(draft.ccRecipients))
+    ? draft
+    : await callGraphAPI(accessToken, 'GET', `${prefix}/messages/${draft.id}`, null, {
+      $select: 'toRecipients,ccRecipients,bccRecipients'
+    });
+  const seen = new Set([
+    ...(current.toRecipients || []),
+    ...(current.ccRecipients || []),
+    ...(current.bccRecipients || [])
+  ].map(r => normalizeEmailAddress(recipientAddress(r))));
+  const update = {};
+  if (isPassed(params.cc)) {
+    const cc = [...(current.ccRecipients || [])];
+    addUniqueRecipients(cc, seen, params.cc);
+    update.ccRecipients = cc;
+  }
+  if (isPassed(params.bcc)) {
+    const bcc = [...(current.bccRecipients || [])];
+    addUniqueRecipients(bcc, seen, params.bcc);
+    update.bccRecipients = bcc;
+  }
+  await callGraphAPI(accessToken, 'PATCH', `${prefix}/messages/${draft.id}`, update, null);
+  const addresses = list => (list || []).map(recipientAddress);
+  return { cc: addresses(update.ccRecipients), bcc: addresses(update.bccRecipients) };
+}
+
 async function createReplyAllDraft(accessToken, params) {
+  let draft;
   try {
     const policyError = await enforceMailPolicy('draft_reply_all', params);
     if (policyError) {
       return { content: [{ type: 'text', text: policyError }] };
+    }
+    const refusal = draftReplyAllRefusal(params);
+    if (refusal) {
+      return { content: [{ type: 'text', text: refusal }] };
     }
     if (!params?.emailId || !params?.body) {
       return {
@@ -901,7 +955,6 @@ async function createReplyAllDraft(accessToken, params) {
     const fileAttachments = params.attachments?.length
       ? buildFileAttachments(params.attachments)
       : [];
-    let draft;
     let fallback = null;
     try {
       draft = await callGraphAPI(
@@ -922,34 +975,65 @@ async function createReplyAllDraft(accessToken, params) {
       }
     } catch (actionError) {
       if (!isReplyActionRoutingError(actionError)) throw actionError;
+      // The fallback derives the reply-all recipients itself; the caller's cc/bcc are added below, on either path.
+      const { cc, bcc, ...derived } = params;
       const fallbackDraft = await createReplyViaDraftFallback(
         accessToken,
-        { ...params, replyAll: true },
+        { ...derived, replyAll: true },
         prefix,
         fileAttachments
       );
       draft = { id: fallbackDraft.draftId, conversationId: fallbackDraft.conversationId };
       fallback = 'threaded-draft';
     }
+    let added;
+    try {
+      added = await addReplyAllDraftRecipients(accessToken, prefix, draft, params);
+    } catch (recipientError) {
+      await recordSideEffect('mail.draft_reply_all', 'failed', params.mailbox || null, {
+        emailId: params.emailId,
+        draftId: draft.id,
+        error: `cc/bcc not applied: ${recipientError.message}`,
+        sent: false
+      });
+      return {
+        draftId: draft.id,
+        sent: false,
+        fallback,
+        content: [{
+          type: 'text',
+          text: `Reply-all draft ${draft.id} was created but adding cc/bcc FAILED (${recipientError.message}); the `
+            + 'draft carries only the reply-all recipients. Add them with update_draft. No message was sent.'
+        }]
+      };
+    }
     await recordSideEffect('mail.draft_reply_all', 'success', params.mailbox || null, {
       emailId: params.emailId,
       draftId: draft.id,
       attachments: fileAttachments.length,
+      cc: added ? added.cc.length : 0,
+      bcc: added ? added.bcc.length : 0,
       fallback,
       sent: false
     });
+    const recipientNote = added
+      ? [added.cc.length ? ` Cc: ${added.cc.join(', ')}.` : '', added.bcc.length ? ` Bcc: ${added.bcc.join(', ')}.` : '']
+        .join('')
+      : '';
     return {
       draftId: draft.id,
       sent: false,
       fallback,
+      ...(added ? { cc: added.cc, bcc: added.bcc } : {}),
       content: [{
         type: 'text',
-        text: `Reply-all draft created. Draft ID: ${draft.id}. No message was sent.`
+        text: `Reply-all draft created. Draft ID: ${draft.id}.${recipientNote} No message was sent.`
       }]
     };
   } catch (error) {
     await recordSideEffect('mail.draft_reply_all', 'failed', params?.mailbox || null, {
       emailId: params?.emailId || null,
+      draftId: draft?.id || null,
       error: error.message
     });
     return { content: [{ type: 'text', text: `Reply-all draft error: ${error.message}` }] };
@@ -1401,7 +1485,7 @@ async function handleMail(args) {
 const emailTools = [
   {
     name: "mail",
-    description: "Unified email management. draft_reply_all creates a threaded reply-all draft and never sends it; reply/send/send_draft are transmission operations.",
+    description: "Unified email management. draft_reply_all creates a threaded reply-all draft and never sends it (it takes emailId, body, mailbox, attachments, cc and bcc, ADDS cc/bcc to the reply-all recipients, and refuses any other parameter by name); reply/send/send_draft are transmission operations.",
     inputSchema: {
       type: "object",
       properties: {
