@@ -544,11 +544,34 @@ async function enforceFilesPolicy(args = {}) {
 // can contain guests, and the destination's membership is not visible from the
 // call arguments -- so this gates the capability rather than pretending to check
 // recipients it cannot see.
+//
+// One narrow opening: posting a message, or replying in a thread, in a channel
+// the operator has listed by id (`teams.allowed_channels`). Listing a channel
+// is the membership review this fence cannot do itself -- the token holds no
+// ChannelMember permission, so the channel must be private and internal-only,
+// and that is on whoever owns it. Nothing else is opened: creating, renaming or
+// deleting channels, adding or removing members, and every unlisted channel or
+// chat stay blocked, because each of those changes who can read.
+const CHANNEL_POSTS = new Set(['create_message', 'reply_to_message']);
+
+function _listedChannel(teams, args) {
+  const listed = Array.isArray(teams.allowed_channels) ? teams.allowed_channels : [];
+  if (!CHANNEL_POSTS.has(args.operation) || !args.channelId || !args.teamId) return null;
+  return listed.find(c => c && c.channel_id === args.channelId && c.team_id === args.teamId) || null;
+}
+
 async function enforceTeamsPolicy(args = {}) {
   const policy = getExecutionPolicy();
   if (!policy) return null;
 
   const teams = policy.teams || {};
+  const listed = !teams.write && _listedChannel(teams, args);
+  if (listed) {
+    await recordSideEffect('teams.write', 'allowed', args.channelId, {
+      reason: 'allow-listed channel', operation: args.operation, label: listed.label || null
+    });
+    return null;
+  }
   if (!teams.write) {
     const reason =
       'Blocked by communication-agent policy: Teams writes are not allowed for this '

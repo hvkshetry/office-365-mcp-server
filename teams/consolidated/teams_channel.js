@@ -15,6 +15,14 @@
 const { ensureAuthenticated } = require('../../auth');
 const { callGraphAPI } = require('../../utils/graph-api');
 const config = require('../../config');
+const { enforceTeamsPolicy } = require('../../policy');
+
+// Every operation that sends, or changes who can read. Reads are never gated.
+const CHANNEL_WRITES = new Set([
+  'create', 'update', 'delete',
+  'create_message', 'reply_to_message',
+  'add_member', 'remove_member'
+]);
 
 /**
  * Main handler for teams_channel operations
@@ -38,7 +46,16 @@ async function handleTeamsChannel(args) {
     console.error('teams_channel params:', JSON.stringify(params));
     
     const accessToken = await ensureAuthenticated();
-    
+
+    // This tool was outside the Teams fence entirely: a channel post, a new
+    // channel or a new member went straight to Graph whatever the policy said.
+    if (CHANNEL_WRITES.has(operation)) {
+      const policyError = await enforceTeamsPolicy({ operation, ...params });
+      if (policyError) {
+        return { content: [{ type: "text", text: policyError }] };
+      }
+    }
+
     switch (operation) {
       case 'list':
         return await listChannels(accessToken, params);

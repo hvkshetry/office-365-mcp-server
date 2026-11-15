@@ -321,3 +321,71 @@ describe('Teams writes are fenced', () => {
     expect(JSON.stringify(res)).not.toMatch(/Blocked by communication-agent policy/);
   });
 });
+
+describe('Teams channel writes are fenced', () => {
+  const CHANNEL = '../teams/consolidated/teams_channel';
+  const MINSTER = { team_id: 'team-ops', channel_id: '19:minster@thread.tacv2', label: 'OH-MNSTR' };
+  const LISTED = JSON.stringify({ ...JSON.parse(POLICY), teams: { write: false, allowed_channels: [MINSTER] } });
+  const writes = calls => calls.filter(c => c[1] !== 'GET');
+
+  it.each(['create', 'update', 'delete', 'create_message', 'reply_to_message', 'add_member', 'remove_member'])(
+    'blocks %s when the policy grants no teams capability', async (operation) => {
+      const { handler, callGraphAPI } = loadTool(CHANNEL, null, POLICY);
+      const res = await handler({ operation, teamId: 'team-ops', channelId: '19:minster@thread.tacv2',
+        messageId: 'm1', content: 'x', displayName: 'n', userId: 'u1' });
+      expect(res.content[0].text).toMatch(/Blocked by communication-agent policy/);
+      expect(writes(callGraphAPI.mock.calls)).toHaveLength(0);
+    });
+
+  it('posts and replies in an allow-listed channel', async () => {
+    const { handler, callGraphAPI } = loadTool(CHANNEL, null, LISTED);
+    const post = await handler({ operation: 'create_message', teamId: 'team-ops',
+      channelId: '19:minster@thread.tacv2', content: 'diagnosis' });
+    expect(JSON.stringify(post)).not.toMatch(/Blocked by communication-agent policy/);
+    const reply = await handler({ operation: 'reply_to_message', teamId: 'team-ops',
+      channelId: '19:minster@thread.tacv2', messageId: 'm1', content: 'follow-up' });
+    expect(JSON.stringify(reply)).not.toMatch(/Blocked by communication-agent policy/);
+    expect(writes(callGraphAPI.mock.calls).length).toBeGreaterThan(0);
+  });
+
+  it('refuses an unlisted channel, and a listed channel id under a different team', async () => {
+    const { handler, callGraphAPI } = loadTool(CHANNEL, null, LISTED);
+    for (const target of [{ teamId: 'team-ops', channelId: '19:other@thread.tacv2' },
+                          { teamId: 'team-elsewhere', channelId: '19:minster@thread.tacv2' },
+                          { channelId: '19:minster@thread.tacv2' }]) {
+      const res = await handler({ operation: 'create_message', content: 'x', ...target });
+      expect(res.content[0].text).toMatch(/Blocked by communication-agent policy/);
+    }
+    expect(writes(callGraphAPI.mock.calls)).toHaveLength(0);
+  });
+
+  it.each(['create', 'update', 'delete', 'add_member', 'remove_member'])(
+    'still blocks %s in the allow-listed channel', async (operation) => {
+      const { handler, callGraphAPI } = loadTool(CHANNEL, null, LISTED);
+      const res = await handler({ operation, teamId: 'team-ops', channelId: '19:minster@thread.tacv2',
+        displayName: 'n', userId: 'u1' });
+      expect(res.content[0].text).toMatch(/Blocked by communication-agent policy/);
+      expect(writes(callGraphAPI.mock.calls)).toHaveLength(0);
+    });
+
+  it('does not open group chats', async () => {
+    const { handler, callGraphAPI } = loadTool('../teams/consolidated/teams_chat', null, LISTED);
+    const res = await handler({ operation: 'send_message', chatId: '19:minster@thread.tacv2', content: 'x' });
+    expect(res.content[0].text).toMatch(/Blocked by communication-agent policy/);
+    expect(writes(callGraphAPI.mock.calls)).toHaveLength(0);
+  });
+
+  it('never gates channel reads', async () => {
+    const { handler } = loadTool(CHANNEL, null, POLICY);
+    const res = await handler({ operation: 'list_messages', teamId: 'team-ops', channelId: '19:minster@thread.tacv2' });
+    expect(JSON.stringify(res)).not.toMatch(/Blocked by communication-agent policy/);
+  });
+});
+
+describe('Teams chat reads', () => {
+  it('remain ungated', async () => {
+    const { handler } = loadTool('../teams/consolidated/teams_chat', null, POLICY);
+    const res = await handler({ operation: 'list_messages', chatId: '19:abc' });
+    expect(JSON.stringify(res)).not.toMatch(/Blocked by communication-agent policy/);
+  });
+});
