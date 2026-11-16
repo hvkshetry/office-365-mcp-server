@@ -3,6 +3,7 @@
  */
 
 const { ensureAuthenticated } = require('../auth');
+const { enforceMailPolicy } = require('../policy');
 const { callGraphAPI } = require('../utils/graph-api');
 const config = require('../config');
 
@@ -29,10 +30,19 @@ async function handleEmailRules(args) {
         return enhanced ?
           await listEmailRulesEnhanced(accessToken, params.mailbox) :
           await listEmailRules(accessToken, params.mailbox);
-      case 'create':
+      case 'create': {
+        // Enforced HERE, not at the router, so every caller is covered. An
+        // inbox rule with forwardTo is an outbound path that never touches
+        // send/reply, so it must clear both the operation gate and the
+        // recipient allowlist (policy.js checks params.forwardTo).
+        const policyError = await enforceMailPolicy('create_rule', params);
+        if (policyError) {
+          return { content: [{ type: "text", text: policyError }] };
+        }
         return enhanced ?
           await createEmailRuleEnhanced(accessToken, params) :
           await createEmailRule(accessToken, params);
+      }
       default:
         return {
           content: [{

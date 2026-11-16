@@ -44,6 +44,40 @@ const channelToolSchema = {
         'list_messages', 'get_message', 'create_message', 'reply_to_message',
         'list_members', 'add_member', 'remove_member', 'list_tabs'
       ]
+    },
+    images: {
+      type: 'array',
+      maxItems: 4,
+      description: 'create_message / reply_to_message only: local PNG, JPEG or GIF files (max 3 MB each) '
+        + 'shown inline in the post. Put {{image:1}}, {{image:2}}... in content to place each one; '
+        + 'images without a placeholder are appended at the end.',
+      items: {
+        type: 'object',
+        required: ['path'],
+        properties: {
+          path: { type: 'string', description: 'Absolute path to the image file' },
+          alt: { type: 'string', description: 'Alt text (defaults to the file name)' }
+        }
+      }
+    },
+    files: {
+      type: 'array',
+      maxItems: 5,
+      description: 'create_message / reply_to_message only: local documents to attach as Teams file '
+        + 'cards: PDF (.pdf), Word (.docx), Excel (.xlsx) or PowerPoint (.pptx), max 25 MB each, '
+        + 'no macros. Each is uploaded to the channel\'s own Files folder (readable by the team, '
+        + 'no sharing link) and attached. Put {{file:1}}, {{file:2}}... in content to place each '
+        + 'card; files without a placeholder are attached at the end. The type is checked from '
+        + 'the file\'s bytes, not its name. If any file is rejected or fails to upload, nothing '
+        + 'is posted.',
+      items: {
+        type: 'object',
+        required: ['path'],
+        properties: {
+          path: { type: 'string', description: 'Absolute path to the document' },
+          name: { type: 'string', description: 'File name shown in Teams (defaults to the file\'s name; must keep its extension)' }
+        }
+      }
     }
   }
 };

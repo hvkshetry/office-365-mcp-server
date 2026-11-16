@@ -51,12 +51,18 @@ function loadMailWithMocks() {
   const callGraphAPI = jest.fn();
   const enforceMailPolicy = jest.fn().mockResolvedValue(null);
   const recordSideEffect = jest.fn().mockResolvedValue(undefined);
+  // Default: no recipient restriction, so these fallback tests exercise the
+  // pre-existing behaviour. Tests that need the fence override these.
+  const recipientRestrictionActive = jest.fn().mockReturnValue(false);
+  const partitionRecipients = jest.fn(r => ({ kept: r || [], removed: [], enforced: false }));
 
   jest.doMock('../auth', () => ({ ensureAuthenticated }));
   jest.doMock('../utils/graph-api', () => ({ callGraphAPI }));
   jest.doMock('../policy', () => ({
     enforceMailPolicy,
-    recordSideEffect
+    recordSideEffect,
+    recipientRestrictionActive,
+    partitionRecipients
   }));
 
   const { emailTools } = require('../email');
@@ -65,6 +71,8 @@ function loadMailWithMocks() {
     callGraphAPI,
     enforceMailPolicy,
     recordSideEffect,
+    recipientRestrictionActive,
+    partitionRecipients,
     ensureAuthenticated
   };
 }

@@ -15,6 +15,16 @@
 const { ensureAuthenticated } = require('../../auth');
 const { callGraphAPI } = require('../../utils/graph-api');
 const config = require('../../config');
+const { enforceTeamsPolicy } = require('../../policy');
+const { buildHostedImages } = require('./channel_images');
+const { validateFiles, uploadToChannel, placeFileTags } = require('./channel_files');
+
+// Every operation that sends, or changes who can read. Reads are never gated.
+const CHANNEL_WRITES = new Set([
+  'create', 'update', 'delete',
+  'create_message', 'reply_to_message',
+  'add_member', 'remove_member'
+]);
 
 /**
  * Main handler for teams_channel operations
@@ -38,7 +48,16 @@ async function handleTeamsChannel(args) {
     console.error('teams_channel params:', JSON.stringify(params));
     
     const accessToken = await ensureAuthenticated();
-    
+
+    // This tool was outside the Teams fence entirely: a channel post, a new
+    // channel or a new member went straight to Graph whatever the policy said.
+    if (CHANNEL_WRITES.has(operation)) {
+      const policyError = await enforceTeamsPolicy({ operation, ...params });
+      if (policyError) {
+        return { content: [{ type: "text", text: policyError }] };
+      }
+    }
+
     switch (operation) {
       case 'list':
         return await listChannels(accessToken, params);
@@ -405,10 +424,56 @@ async function getChannelMessage(accessToken, params) {
 }
 
 /**
+ * Graph chatMessage payload shared by posts and replies.
+ *
+ * `images` ([{path, alt?}]) become inline hostedContents (see channel_images.js);
+ * a body with images is always HTML. `attachments` are Graph reference attachments
+ * (a SharePoint/OneDrive file): Graph needs each one's `id` repeated in the body as
+ * <attachment id="...">, so the id is passed through rather than dropped.
+ * `files` ([{path, name?}]) are documents uploaded to the channel's folder first
+ * (see channel_files.js) and arrive here as further reference attachments.
+ */
+function _messagePayload(content, attachments, images) {
+  const built = buildHostedImages(content, images);
+  if (built.error) return { error: built.error };
+  const html = built.hostedContents.length > 0 || built.content.includes('<');
+  const data = { body: { content: built.content, contentType: html ? 'html' : 'text' } };
+  if (built.hostedContents.length > 0) data.hostedContents = built.hostedContents;
+  if (attachments && Array.isArray(attachments) && attachments.length > 0) {
+    data.attachments = attachments.map(attachment => {
+      const { id, name, contentUrl, contentType } = attachment;
+      return id ? { id, name, contentUrl, contentType } : { name, contentUrl, contentType };
+    });
+  }
+  return data;
+}
+
+/**
+ * Validate images and files, upload the files, then build the payload. Everything
+ * is validated before the first upload, so a bad file never leaves a partial upload.
+ */
+async function _payloadWithFiles(accessToken, teamId, channelId, params) {
+  const checked = validateFiles(params.files);
+  if (checked.error) return { error: checked.error };
+  const probe = buildHostedImages(params.content, params.images);
+  if (probe.error) return { error: probe.error };
+  let uploaded = [];
+  try {
+    uploaded = await uploadToChannel(accessToken, teamId, channelId, checked.files);
+  } catch (error) {
+    return { error: `Files were not attached, so nothing was posted: ${error.message}` };
+  }
+  const content = uploaded.length ? placeFileTags(params.content, uploaded) : params.content;
+  const data = _messagePayload(content, [...(params.attachments || []), ...uploaded], params.images);
+  if (!data.error && uploaded.length) data._uploaded = uploaded.map(a => a.name);
+  return data;
+}
+
+/**
  * Create a new channel message
  */
 async function createChannelMessage(accessToken, params) {
-  const { teamId, channelId, content, attachments } = params;
+  const { teamId, channelId, content } = params;
   
   if (!teamId || !channelId || !content) {
     return {
@@ -419,21 +484,11 @@ async function createChannelMessage(accessToken, params) {
     };
   }
   
-  const messageData = {
-    body: {
-      content,
-      contentType: content.includes('<') ? 'html' : 'text'
-    }
-  };
-  
-  // Add attachments if present
-  if (attachments && Array.isArray(attachments) && attachments.length > 0) {
-    messageData.attachments = attachments.map(attachment => {
-      const { name, contentUrl, contentType } = attachment;
-      return { name, contentUrl, contentType };
-    });
-  }
-  
+  const messageData = await _payloadWithFiles(accessToken, teamId, channelId, params);
+  if (messageData.error) return { content: [{ type: "text", text: messageData.error }] };
+  const uploadedNames = messageData._uploaded || [];
+  delete messageData._uploaded;
+
   const response = await callGraphAPI(
     accessToken,
     'POST',
@@ -444,7 +499,8 @@ async function createChannelMessage(accessToken, params) {
   return {
     content: [{ 
       type: "text", 
-      text: `Message posted successfully!\nID: ${response.id}` 
+      text: `Message posted successfully!\nID: ${response.id}`
+        + (uploadedNames.length ? `\nFiles attached: ${uploadedNames.join(', ')}` : '') 
     }]
   };
 }
@@ -453,7 +509,7 @@ async function createChannelMessage(accessToken, params) {
  * Reply to a channel message
  */
 async function replyToChannelMessage(accessToken, params) {
-  const { teamId, channelId, messageId, content, attachments } = params;
+  const { teamId, channelId, messageId, content } = params;
   
   if (!teamId || !channelId || !messageId || !content) {
     return {
@@ -464,21 +520,11 @@ async function replyToChannelMessage(accessToken, params) {
     };
   }
   
-  const replyData = {
-    body: {
-      content,
-      contentType: content.includes('<') ? 'html' : 'text'
-    }
-  };
-  
-  // Add attachments if present
-  if (attachments && Array.isArray(attachments) && attachments.length > 0) {
-    replyData.attachments = attachments.map(attachment => {
-      const { name, contentUrl, contentType } = attachment;
-      return { name, contentUrl, contentType };
-    });
-  }
-  
+  const replyData = await _payloadWithFiles(accessToken, teamId, channelId, params);
+  if (replyData.error) return { content: [{ type: "text", text: replyData.error }] };
+  const uploadedNames = replyData._uploaded || [];
+  delete replyData._uploaded;
+
   const response = await callGraphAPI(
     accessToken,
     'POST',
@@ -489,7 +535,8 @@ async function replyToChannelMessage(accessToken, params) {
   return {
     content: [{ 
       type: "text", 
-      text: `Reply posted successfully!\nID: ${response.id}` 
+      text: `Reply posted successfully!\nID: ${response.id}`
+        + (uploadedNames.length ? `\nFiles attached: ${uploadedNames.join(', ')}` : '') 
     }]
   };
 }
