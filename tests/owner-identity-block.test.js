@@ -26,8 +26,15 @@ afterEach(() => {
   jest.resetModules();
 });
 
-const MAIL_WRITES = ['send', 'reply', 'draft', 'draft_reply_all', 'update_draft', 'send_draft'];
+const MAIL_WRITES = ['send', 'reply', 'send_draft', 'create_rule'];
+const OWNER_DRAFTS = ['draft', 'draft_reply_all', 'update_draft'];
 const TEAMS_WRITES = [
+  ['calendar', { operation: 'create', subject: 's', start: '2026-11-17T10:00', end: '2026-11-17T11:00', attendees: ['x@y.com'] }],
+  ['calendar', { operation: 'update', eventId: 'e', subject: 's' }],
+  ['calendar', { operation: 'delete', eventId: 'e', sendCancellations: true }],
+  ['teams_meeting', { operation: 'create', subject: 's' }],
+  ['teams_meeting', { operation: 'update', meetingId: 'm' }],
+  ['teams_meeting', { operation: 'cancel', meetingId: 'm' }],
   ['teams_channel', { operation: 'create_message', teamId: 't', channelId: 'c', content: 'x' }],
   ['teams_channel', { operation: 'reply_to_message', teamId: 't', channelId: 'c', messageId: 'm', content: 'x' }],
   ['teams_chat', { operation: 'send_message', chatId: 'c', content: 'x' }],
@@ -48,6 +55,13 @@ describe('owner-identity block switched on (OCI deployment)', () => {
     }
   });
 
+  it.each(OWNER_DRAFTS)('allows mail %s in the owner mailbox: a draft sends nothing', async (operation) => {
+    const { enforceOfficeToolPolicy } = loadPolicy({ blocked: '1' });
+    for (const mailbox of [undefined, 'me', OWNER]) {
+      await expect(enforceOfficeToolPolicy('mail', { operation, mailbox, to: ['x@y.com'] })).resolves.toBeNull();
+    }
+  });
+
   it.each(MAIL_WRITES)('allows mail %s from an agent mailbox, to the owner', async (operation) => {
     const { enforceOfficeToolPolicy } = loadPolicy({ blocked: 'true' });
     await expect(enforceOfficeToolPolicy('mail', { operation, mailbox: AGENT, to: [OWNER] })).resolves.toBeNull();
@@ -64,9 +78,12 @@ describe('owner-identity block switched on (OCI deployment)', () => {
       .resolves.toBeNull();
     await expect(enforceOfficeToolPolicy('teams_chat', { chatId: 'c', messageId: 'm' })).resolves.toBeNull();
     await expect(enforceOfficeToolPolicy('teams_meeting', { operation: 'get_transcript' })).resolves.toBeNull();
+    await expect(enforceOfficeToolPolicy('calendar', { operation: 'list' })).resolves.toBeNull();
+    await expect(enforceOfficeToolPolicy('calendar', { operation: 'get', eventId: 'e' })).resolves.toBeNull();
+    await expect(enforceOfficeToolPolicy('mail', { operation: 'list_rules' })).resolves.toBeNull();
   });
 
-  it.each(TEAMS_WRITES)('refuses %s %j as the signed-in owner', async (tool, args) => {
+  it.each(TEAMS_WRITES)('refuses %s %j as the signed-in owner (Teams post, invite or meeting)', async (tool, args) => {
     const { enforceOfficeToolPolicy } = loadPolicy({ blocked: '1' });
     const refusal = await enforceOfficeToolPolicy(tool, args);
     expect(refusal).toContain('OWNER_IDENTITY_BLOCKED');
@@ -85,7 +102,7 @@ describe('owner-identity block switched off (laptop default)', () => {
   it.each([undefined, '', '0', 'false'])('keeps acting as the owner when the switch is %p', async (blocked) => {
     const { enforceOfficeToolPolicy, isOwnerIdentityBlocked } = loadPolicy({ blocked });
     expect(isOwnerIdentityBlocked()).toBe(false);
-    for (const operation of MAIL_WRITES) {
+    for (const operation of [...MAIL_WRITES, ...OWNER_DRAFTS]) {
       await expect(enforceOfficeToolPolicy('mail', { operation })).resolves.toBeNull();
     }
     for (const [tool, args] of TEAMS_WRITES) {

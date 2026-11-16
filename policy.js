@@ -114,23 +114,29 @@ function _mailOperationAllowed(policy, operation) {
 
 // --------------------------------------------------------------------------
 // Owner-identity block (owner D10, 2026-11-16,
+// HOUSE-OCI-AGENTS-NEVER-SEND-AS-OWNER-20261116, superseding
 // HOUSE-OCI-AGENTS-NEVER-ACT-AS-OWNER-20261116): a deployment switch, never a
-// per-call choice. Set (1/true/yes), this process refuses every write it would
-// make as the signed-in owner: mail send/reply/draft/draft_reply_all/
-// update_draft/send_draft from the owner's own mailbox (no `mailbox`, `me`, an
-// owner address, or a value that is not one address), and every Teams channel
-// or chat message post, edit or delete (the delegated token posts as the
-// owner). Reads are untouched. Unset (default) keeps the owner's local
-// behaviour; the OCI communication agent sets it on every persona it
-// dispatches. Owner addresses: OFFICE_MCP_OWNER_MAILBOXES (comma list), else
-// DEFAULT_OWNER_MAILBOXES.
+// per-call choice. Set (1/true/yes), this process refuses what would send or
+// post as the signed-in owner: mail send/reply/send_draft and create_rule from
+// the owner's own mailbox (no `mailbox`, `me`, an owner address, or a value
+// that is not one address); every calendar create/update/delete and Teams
+// meeting create/update/cancel (both act only from the owner's account and can
+// send invitations, updates or cancellations); every Teams channel or chat
+// message post, edit or delete. Drafts in the owner's mailbox (draft,
+// draft_reply_all, update_draft) send nothing and stay allowed; reads are
+// untouched. Unset (default) keeps the owner's local behaviour; the OCI
+// communication agent sets it on every persona it dispatches. Owner addresses:
+// OFFICE_MCP_OWNER_MAILBOXES (comma list), else DEFAULT_OWNER_MAILBOXES.
 // --------------------------------------------------------------------------
 const OWNER_IDENTITY_SWITCH = 'OFFICE_MCP_BLOCK_OWNER_IDENTITY';
 const OWNER_IDENTITY_REFUSAL = 'OWNER_IDENTITY_BLOCKED';
 const DEFAULT_OWNER_MAILBOXES = Object.freeze(['hersh@circleh2o.com']);
-const OWNER_MAIL_WRITE_OPS = new Set([
-  'send', 'reply', 'draft', 'draft_reply_all', 'update_draft', 'send_draft'
-]);
+const OWNER_MAIL_WRITE_OPS = new Set(['send', 'reply', 'send_draft', 'create_rule']);
+// No mailbox parameter: these act only as the owner.
+const OWNER_ACCOUNT_WRITE_OPS = Object.freeze({
+  calendar: new Set(['create', 'update', 'delete']),
+  teams_meeting: new Set(['create', 'update', 'cancel'])
+});
 // teams_chat maps the legacy send/update/delete onto the message operations.
 const OWNER_TEAMS_MESSAGE_OPS = Object.freeze({
   teams_channel: new Set(['create_message', 'reply_to_message']),
@@ -181,6 +187,12 @@ function ownerIdentityRefusal(toolName, args = {}) {
     return `${OWNER_IDENTITY_REFUSAL}: mail ${operation} with ${named} would act as the signed-in owner; `
       + `this deployment (${OWNER_IDENTITY_SWITCH}) acts only from an agent mailbox: pass `
       + 'mailbox: "<your agent mailbox address>"';
+  }
+  const accountOps = OWNER_ACCOUNT_WRITE_OPS[toolName];
+  if (accountOps && accountOps.has(args?.operation)) {
+    return `${OWNER_IDENTITY_REFUSAL}: ${toolName} ${args.operation} acts from the signed-in owner's account `
+      + `and can send invitations, updates or cancellations as the owner; this deployment `
+      + `(${OWNER_IDENTITY_SWITCH}) refuses it`;
   }
   const messageOps = OWNER_TEAMS_MESSAGE_OPS[toolName];
   if (messageOps) {
