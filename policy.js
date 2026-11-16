@@ -112,7 +112,95 @@ function _mailOperationAllowed(policy, operation) {
   }
 }
 
+// --------------------------------------------------------------------------
+// Owner-identity block (owner D10, 2026-11-16,
+// HOUSE-OCI-AGENTS-NEVER-ACT-AS-OWNER-20261116): a deployment switch, never a
+// per-call choice. Set (1/true/yes), this process refuses every write it would
+// make as the signed-in owner: mail send/reply/draft/draft_reply_all/
+// update_draft/send_draft from the owner's own mailbox (no `mailbox`, `me`, an
+// owner address, or a value that is not one address), and every Teams channel
+// or chat message post, edit or delete (the delegated token posts as the
+// owner). Reads are untouched. Unset (default) keeps the owner's local
+// behaviour; the OCI communication agent sets it on every persona it
+// dispatches. Owner addresses: OFFICE_MCP_OWNER_MAILBOXES (comma list), else
+// DEFAULT_OWNER_MAILBOXES.
+// --------------------------------------------------------------------------
+const OWNER_IDENTITY_SWITCH = 'OFFICE_MCP_BLOCK_OWNER_IDENTITY';
+const OWNER_IDENTITY_REFUSAL = 'OWNER_IDENTITY_BLOCKED';
+const DEFAULT_OWNER_MAILBOXES = Object.freeze(['hersh@circleh2o.com']);
+const OWNER_MAIL_WRITE_OPS = new Set([
+  'send', 'reply', 'draft', 'draft_reply_all', 'update_draft', 'send_draft'
+]);
+// teams_chat maps the legacy send/update/delete onto the message operations.
+const OWNER_TEAMS_MESSAGE_OPS = Object.freeze({
+  teams_channel: new Set(['create_message', 'reply_to_message']),
+  teams_chat: new Set([
+    'send_message', 'update_message', 'delete_message', 'send', 'update', 'delete'
+  ])
+});
+
+function isOwnerIdentityBlocked() {
+  return ['1', 'true', 'yes'].includes(
+    String(process.env[OWNER_IDENTITY_SWITCH] || '').trim().toLowerCase()
+  );
+}
+
+function ownerMailboxes() {
+  const raw = process.env.OFFICE_MCP_OWNER_MAILBOXES;
+  const list = raw ? raw.split(/[,;\s]+/) : DEFAULT_OWNER_MAILBOXES;
+  return new Set(list.map(s => s.trim().toLowerCase()).filter(Boolean));
+}
+
+function _isSingleAddress(value) {
+  const parts = value.split('@');
+  return parts.length === 2 && parts[0] !== '' && parts[1] !== '' && !/\s/.test(value);
+}
+
+// As teams_chat infers an operation-less legacy call.
+function _teamsChatOperation(args) {
+  if (args?.operation) return args.operation;
+  if (args?.chatId && args?.messageId) return 'get_message';
+  if (args?.chatId && args?.content) return 'send_message';
+  return undefined;
+}
+
+function ownerIdentityRefusal(toolName, args = {}) {
+  if (!isOwnerIdentityBlocked()) {
+    return null;
+  }
+  if (toolName === 'mail') {
+    const operation = args?.operation;
+    if (!OWNER_MAIL_WRITE_OPS.has(operation)) {
+      return null;
+    }
+    const mailbox = String(args.mailbox ?? '').trim().toLowerCase();
+    if (mailbox && mailbox !== 'me' && _isSingleAddress(mailbox) && !ownerMailboxes().has(mailbox)) {
+      return null;
+    }
+    const named = mailbox ? `mailbox "${String(args.mailbox).trim()}"` : 'no mailbox (the owner\'s own)';
+    return `${OWNER_IDENTITY_REFUSAL}: mail ${operation} with ${named} would act as the signed-in owner; `
+      + `this deployment (${OWNER_IDENTITY_SWITCH}) acts only from an agent mailbox: pass `
+      + 'mailbox: "<your agent mailbox address>"';
+  }
+  const messageOps = OWNER_TEAMS_MESSAGE_OPS[toolName];
+  if (messageOps) {
+    const operation = toolName === 'teams_chat' ? _teamsChatOperation(args) : args?.operation;
+    if (messageOps.has(operation)) {
+      return `${OWNER_IDENTITY_REFUSAL}: ${toolName} ${operation} posts as the signed-in owner; `
+        + `this deployment (${OWNER_IDENTITY_SWITCH}) refuses every Teams message write made as the owner`;
+    }
+  }
+  return null;
+}
+
 async function enforceOfficeToolPolicy(toolName, args = {}) {
+  const ownerRefusal = ownerIdentityRefusal(toolName, args);
+  if (ownerRefusal) {
+    await recordSideEffect(`${toolName}.${args?.operation || 'unknown'}`, 'blocked', args?.mailbox || null, {
+      reason: ownerRefusal
+    });
+    return ownerRefusal;
+  }
   if (!isLegalDraftOnly()) {
     return null;
   }
@@ -330,8 +418,12 @@ async function enforceCalendarPolicy(args = {}) {
 
 module.exports = {
   LEGAL_TOOL_MANIFEST,
+  OWNER_IDENTITY_SWITCH,
+  OWNER_IDENTITY_REFUSAL,
   getExecutionPolicy,
   isLegalDraftOnly,
+  isOwnerIdentityBlocked,
+  ownerIdentityRefusal,
   recordSideEffect,
   enforceOfficeToolPolicy,
   enforceMailPolicy,
