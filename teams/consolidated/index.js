@@ -59,6 +59,25 @@ const channelToolSchema = {
           alt: { type: 'string', description: 'Alt text (defaults to the file name)' }
         }
       }
+    },
+    files: {
+      type: 'array',
+      maxItems: 5,
+      description: 'create_message / reply_to_message only: local documents to attach as Teams file '
+        + 'cards: PDF (.pdf), Word (.docx), Excel (.xlsx) or PowerPoint (.pptx), max 25 MB each, '
+        + 'no macros. Each is uploaded to the channel\'s own Files folder (readable by the team, '
+        + 'no sharing link) and attached. Put {{file:1}}, {{file:2}}... in content to place each '
+        + 'card; files without a placeholder are attached at the end. The type is checked from '
+        + 'the file\'s bytes, not its name. If any file is rejected or fails to upload, nothing '
+        + 'is posted.',
+      items: {
+        type: 'object',
+        required: ['path'],
+        properties: {
+          path: { type: 'string', description: 'Absolute path to the document' },
+          name: { type: 'string', description: 'File name shown in Teams (defaults to the file\'s name; must keep its extension)' }
+        }
+      }
     }
   }
 };
