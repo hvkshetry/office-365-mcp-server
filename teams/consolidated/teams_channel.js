@@ -16,6 +16,7 @@ const { ensureAuthenticated } = require('../../auth');
 const { callGraphAPI } = require('../../utils/graph-api');
 const config = require('../../config');
 const { enforceTeamsPolicy } = require('../../policy');
+const { buildHostedImages } = require('./channel_images');
 
 // Every operation that sends, or changes who can read. Reads are never gated.
 const CHANNEL_WRITES = new Set([
@@ -422,6 +423,29 @@ async function getChannelMessage(accessToken, params) {
 }
 
 /**
+ * Graph chatMessage payload shared by posts and replies.
+ *
+ * `images` ([{path, alt?}]) become inline hostedContents (see channel_images.js);
+ * a body with images is always HTML. `attachments` are Graph reference attachments
+ * (a SharePoint/OneDrive file): Graph needs each one's `id` repeated in the body as
+ * <attachment id="...">, so the id is passed through rather than dropped.
+ */
+function _messagePayload(content, attachments, images) {
+  const built = buildHostedImages(content, images);
+  if (built.error) return { error: built.error };
+  const html = built.hostedContents.length > 0 || built.content.includes('<');
+  const data = { body: { content: built.content, contentType: html ? 'html' : 'text' } };
+  if (built.hostedContents.length > 0) data.hostedContents = built.hostedContents;
+  if (attachments && Array.isArray(attachments) && attachments.length > 0) {
+    data.attachments = attachments.map(attachment => {
+      const { id, name, contentUrl, contentType } = attachment;
+      return id ? { id, name, contentUrl, contentType } : { name, contentUrl, contentType };
+    });
+  }
+  return data;
+}
+
+/**
  * Create a new channel message
  */
 async function createChannelMessage(accessToken, params) {
@@ -436,21 +460,9 @@ async function createChannelMessage(accessToken, params) {
     };
   }
   
-  const messageData = {
-    body: {
-      content,
-      contentType: content.includes('<') ? 'html' : 'text'
-    }
-  };
-  
-  // Add attachments if present
-  if (attachments && Array.isArray(attachments) && attachments.length > 0) {
-    messageData.attachments = attachments.map(attachment => {
-      const { name, contentUrl, contentType } = attachment;
-      return { name, contentUrl, contentType };
-    });
-  }
-  
+  const messageData = _messagePayload(content, attachments, params.images);
+  if (messageData.error) return { content: [{ type: "text", text: messageData.error }] };
+
   const response = await callGraphAPI(
     accessToken,
     'POST',
@@ -481,21 +493,9 @@ async function replyToChannelMessage(accessToken, params) {
     };
   }
   
-  const replyData = {
-    body: {
-      content,
-      contentType: content.includes('<') ? 'html' : 'text'
-    }
-  };
-  
-  // Add attachments if present
-  if (attachments && Array.isArray(attachments) && attachments.length > 0) {
-    replyData.attachments = attachments.map(attachment => {
-      const { name, contentUrl, contentType } = attachment;
-      return { name, contentUrl, contentType };
-    });
-  }
-  
+  const replyData = _messagePayload(content, attachments, params.images);
+  if (replyData.error) return { content: [{ type: "text", text: replyData.error }] };
+
   const response = await callGraphAPI(
     accessToken,
     'POST',
