@@ -44,6 +44,21 @@ const channelToolSchema = {
         'list_messages', 'get_message', 'create_message', 'reply_to_message',
         'list_members', 'add_member', 'remove_member', 'list_tabs'
       ]
+    },
+    images: {
+      type: 'array',
+      maxItems: 4,
+      description: 'create_message / reply_to_message only: local PNG, JPEG or GIF files (max 3 MB each) '
+        + 'shown inline in the post. Put {{image:1}}, {{image:2}}... in content to place each one; '
+        + 'images without a placeholder are appended at the end.',
+      items: {
+        type: 'object',
+        required: ['path'],
+        properties: {
+          path: { type: 'string', description: 'Absolute path to the image file' },
+          alt: { type: 'string', description: 'Alt text (defaults to the file name)' }
+        }
+      }
     }
   }
 };
