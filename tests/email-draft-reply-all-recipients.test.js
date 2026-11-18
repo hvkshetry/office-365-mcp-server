@@ -32,7 +32,11 @@ function loadMailWithMocks() {
   const recordSideEffect = jest.fn().mockResolvedValue(undefined);
   jest.doMock('../auth', () => ({ ensureAuthenticated: jest.fn().mockResolvedValue('access-token') }));
   jest.doMock('../utils/graph-api', () => ({ callGraphAPI }));
-  jest.doMock('../policy', () => ({ enforceMailPolicy: jest.fn().mockResolvedValue(null), recordSideEffect }));
+  jest.doMock('../policy', () => ({
+    enforceMailPolicy: jest.fn().mockResolvedValue(null),
+    recipientGateRefusal: jest.fn().mockResolvedValue(null),
+    recordSideEffect
+  }));
   const { emailTools } = require('../email');
   return { mail: emailTools[0].handler, callGraphAPI, recordSideEffect };
 }

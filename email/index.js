@@ -11,7 +11,7 @@ const { callGraphAPI } = require('../utils/graph-api');
 const { safeTool } = require('../utils/errors');
 const { validateId } = require('../utils/validate');
 const config = require('../config');
-const { enforceMailPolicy, recordSideEffect } = require('../policy');
+const { enforceMailPolicy, recipientGateRefusal, recordSideEffect } = require('../policy');
 
 // Submodule imports
 const { handleEmailSearch } = require('./search');
@@ -191,6 +191,26 @@ function buildFallbackReplyRecipients(originalMessage, params, selfAddresses) {
   }
 
   return { toRecipients, ccRecipients };
+}
+
+// The recipients a reply reaches, for the recipient gate (policy.js recipientGateRefusal): the original's from, sender
+// and replyTo; for reply-all its To and Cc too; and any to/cc/bcc the caller adds. A union, so never fewer than Graph
+// sends to; the replying mailbox is excluded, as Graph excludes it.
+async function replyGateRecipients(accessToken, prefix, params) {
+  const [originalMessage, selfAddresses] = await Promise.all([
+    fetchReplySourceMessage(accessToken, prefix, params.emailId),
+    getMailboxOwnerAddresses(accessToken, params.mailbox)
+  ]);
+  const reached = [originalMessage.from, originalMessage.sender, ...(originalMessage.replyTo || [])];
+  if (params.replyAll) {
+    reached.push(...(originalMessage.toRecipients || []), ...(originalMessage.ccRecipients || []));
+  }
+  for (const field of ['to', 'cc', 'bcc']) {
+    if (isPassed(params[field])) reached.push(...(Array.isArray(params[field]) ? params[field] : [params[field]]));
+  }
+  return reached
+    .map(recipientAddress)
+    .filter(address => address && !selfAddresses.has(normalizeEmailAddress(address)));
 }
 
 async function createReplyViaDraftFallback(accessToken, params, prefix, fileAttachments = []) {
@@ -644,6 +664,11 @@ async function sendEmail(accessToken, params) {
       };
     }
 
+    const gateRefusal = await recipientGateRefusal('send', [params.to, params.cc, params.bcc], params);
+    if (gateRefusal) {
+      return { content: [{ type: "text", text: gateRefusal }] };
+    }
+
     const message = {
       subject: params.subject,
       body: {
@@ -745,6 +770,15 @@ async function replyToEmail(accessToken, params) {
       };
     }
     validateId(params.emailId, 'emailId');
+
+    const gateRefusal = await recipientGateRefusal(
+      'reply',
+      () => replyGateRecipients(accessToken, config.getMailboxPrefix(params.mailbox), params),
+      params
+    );
+    if (gateRefusal) {
+      return { content: [{ type: "text", text: gateRefusal }] };
+    }
 
     // Use comment (not message.body) so Graph preserves the quoted original message.
     // message.body replaces the entire reply body, wiping the original.
@@ -1310,6 +1344,15 @@ async function sendDraft(accessToken, params) {
       };
     }
     validateId(draftId, 'draftId');
+
+    const gateRefusal = await recipientGateRefusal('send_draft', async () => {
+      const draft = await callGraphAPI(accessToken, 'GET', `${config.getMailboxPrefix(mailbox)}/messages/${draftId}`,
+        null, { $select: 'toRecipients,ccRecipients,bccRecipients' });
+      return [draft.toRecipients, draft.ccRecipients, draft.bccRecipients];
+    }, params);
+    if (gateRefusal) {
+      return { content: [{ type: "text", text: gateRefusal }] };
+    }
 
     await callGraphAPI(
       accessToken,

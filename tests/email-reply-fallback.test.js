@@ -56,6 +56,7 @@ function loadMailWithMocks() {
   jest.doMock('../utils/graph-api', () => ({ callGraphAPI }));
   jest.doMock('../policy', () => ({
     enforceMailPolicy,
+    recipientGateRefusal: jest.fn().mockResolvedValue(null),
     recordSideEffect
   }));
 

@@ -20,7 +20,7 @@ const modules = [
   require('../groups').groupsTools,
   require('../directory').directoryTools
 ];
-const { LEGAL_TOOL_MANIFEST } = require('../policy');
+const { LEGAL_TOOL_MANIFEST, LEGAL_GATED_TRANSMIT_OPERATIONS } = require('../policy');
 
 function normalize(value) {
   if (Array.isArray(value)) {
@@ -60,7 +60,10 @@ function currentSurface() {
     schema_version: 'puran.office-legal-tool-surface/v1',
     tool_names: tools.map(tool => tool.name),
     tool_schema_sha256: digest(tools),
-    legal_persona_allowlist: reviewed
+    legal_persona_allowlist: reviewed,
+    // Owner ruling HOUSE-LEGAL-PROMOTER-GROUP-REPLY-20261118: admitted only under a request policy's recipient_gate,
+    // every recipient in its allowed list (policy.js recipientGateRefusal); otherwise Legal stays draft-only.
+    legal_persona_gated_transmit: { mail: Array.from(LEGAL_GATED_TRANSMIT_OPERATIONS).sort() }
   };
 }
 

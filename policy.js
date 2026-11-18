@@ -213,6 +213,19 @@ async function enforceOfficeToolPolicy(toolName, args = {}) {
     });
     return ownerRefusal;
   }
+  const idRefusal = applyRequestEmailId(toolName, args);
+  if (idRefusal) {
+    await recordSideEffect(`${toolName}.${args?.operation || 'unknown'}`, 'blocked', args?.mailbox || null, {
+      reason: idRefusal
+    });
+    return idRefusal;
+  }
+  const forwardRefusal = await recipientGateRefusal('create_rule', () => args?.forwardTo, args, {
+    applies: toolName === 'mail' && args?.operation === 'create_rule' && _isPassed(args?.forwardTo)
+  });
+  if (forwardRefusal) {
+    return forwardRefusal;
+  }
   if (!isLegalDraftOnly()) {
     return null;
   }
@@ -225,13 +238,16 @@ async function enforceOfficeToolPolicy(toolName, args = {}) {
 
   const allowedOperations = LEGAL_TOOL_MANIFEST[toolName];
   const operation = args?.operation;
-  if (allowedOperations !== null && (!operation || !allowedOperations.has(operation))) {
+  // R6: under a request's recipient gate Legal transmits to the promoter group (the mail handler checks every
+  // recipient); without one Legal stays draft-only.
+  const gatedTransmit = toolName === 'mail' && LEGAL_GATED_TRANSMIT_OPERATIONS.has(operation) && recipientGate() !== null;
+  if (allowedOperations !== null && !gatedTransmit && (!operation || !allowedOperations.has(operation))) {
     const reason = `Blocked by Legal OS tool manifest: ${toolName}.${operation || '<missing>'} is not allowed`;
     await recordSideEffect('legal.tool.blocked', 'blocked', toolName, { reason, operation });
     return reason;
   }
 
-  if (toolName === 'mail' && ['draft', 'update_draft', 'draft_reply_all'].includes(operation)) {
+  if (toolName === 'mail' && (gatedTransmit || ['draft', 'update_draft', 'draft_reply_all'].includes(operation))) {
     const mailbox = String(args.mailbox || '').toLowerCase();
     if (mailbox !== LEGAL_MAILBOX) {
       const reason = `Blocked by Legal OS: ${operation} must explicitly use mailbox "${LEGAL_MAILBOX}"`;
@@ -312,9 +328,130 @@ function _recipientViolation(policy, params) {
   return [...new Set(external)].slice(0, 5).join(', ');
 }
 
+// --------------------------------------------------------------------------
+// Recipient gate (owner rulings 2026-11-18: HOUSE-CBG-ORIGINATION-PROMOTER-THREAD-REPLY-20261118 for CBG Origination,
+// HOUSE-LEGAL-PROMOTER-GROUP-REPLY-20261118 for Legal). Active only when the per-request policy
+// (COMMUNICATION_AGENT_POLICY_JSON) carries `recipient_gate`; the communication agent sets it for the gated personas
+// (communication-agent src/policy.py RECIPIENT_GATE_RULINGS), and its delegates inherit the request policy. Under it a
+// transmission (mail send, reply, send_draft, or a create_rule that forwards) is allowed only when EVERY recipient is
+// one of `recipient_gate.allowed_recipients`: to, cc and bcc, a draft's own recipients, and for a reply the set Graph
+// derives from the original message (reply: from/sender/replyTo; reply-all adds its To and Cc; the replying mailbox
+// itself excluded, as Graph excludes it). Anything else is refused and the persona drafts (draft_reply_all on a thread,
+// draft otherwise) for the owner to send. Drafts send nothing and are not gated. A gate with no readable allowed list,
+// or a transmission whose recipients cannot be read, is refused (fail closed). Under a gate the Legal OS draft-only
+// switch admits the gated transmissions (R6); without one Legal stays draft-only.
+// --------------------------------------------------------------------------
+const RECIPIENT_GATE_REFUSAL = 'RECIPIENT_GATE';
+const GATED_TRANSMIT_OPERATIONS = Object.freeze(new Set(['send', 'reply', 'send_draft']));
+const LEGAL_GATED_TRANSMIT_OPERATIONS = GATED_TRANSMIT_OPERATIONS;
+
+function _isPassed(value) {
+  if (value === undefined || value === null || value === '') return false;
+  return !(Array.isArray(value) && value.length === 0);
+}
+
+// One bare, lower-cased address, or '' when the value is not exactly one address.
+function _bareAddress(raw) {
+  let s = String(raw ?? '').trim();
+  const angled = s.match(/<([^<>]+)>/);
+  if (angled) s = angled[1].trim();
+  s = s.replace(/^mailto:/i, '').trim().toLowerCase();
+  return _isSingleAddress(s) ? s : '';
+}
+
+function recipientGate(policy = getExecutionPolicy()) {
+  const gate = policy?.recipient_gate;
+  if (gate === undefined || gate === null) return null;
+  const listed = Array.isArray(gate?.allowed_recipients) ? gate.allowed_recipients : [];
+  return {
+    allowed: new Set(listed.map(_bareAddress).filter(Boolean)),
+    ruling: String(gate?.ruling_id || 'the request recipient gate')
+  };
+}
+
+/**
+ * The gate's refusal for one transmission, or null. `recipients` is a value or a function returning one (called only
+ * when the gate applies, so an ungated run makes no Graph read); every shape _collectAddresses reads is accepted.
+ */
+async function recipientGateRefusal(operation, recipients, params = {}, { applies } = {}) {
+  const gate = recipientGate();
+  const transmits = applies === undefined ? GATED_TRANSMIT_OPERATIONS.has(operation) : applies;
+  if (!gate || !transmits) return null;
+  let read;
+  try {
+    read = typeof recipients === 'function' ? await recipients() : recipients;
+  } catch (error) {
+    read = undefined;
+    const reason = `${RECIPIENT_GATE_REFUSAL}: mail ${operation} refused: its recipients could not be read `
+      + `(${error.message}); under ${gate.ruling} a transmission goes ahead only when every recipient is known to be `
+      + 'in the promoter group. Nothing was sent. Draft it instead (draft_reply_all on a thread, else draft) and name '
+      + 'the draft.';
+    await recordSideEffect(`mail.${operation}`, 'blocked', params.mailbox || null, { reason });
+    return reason;
+  }
+  const raw = [];
+  _collectAddresses(read, raw);
+  const outside = [...new Set(raw.map(a => _bareAddress(a) || String(a)).filter(a => !gate.allowed.has(a)))];
+  if (raw.length > 0 && outside.length === 0) return null;
+  const why = raw.length === 0
+    ? 'names no recipient this check could read'
+    : `would go to ${outside.length} recipient(s) outside the promoter group and the agent mailboxes `
+      + `(${outside.slice(0, 5).join(', ')})`;
+  const instead = operation === 'create_rule'
+    ? 'No rule was created: a rule may not forward outside them.'
+    : 'Nothing was sent. Answer with mail draft_reply_all on the thread (or draft for a new message), keeping every '
+      + 'recipient, and name the draft: the owner sends it.';
+  const reason = `${RECIPIENT_GATE_REFUSAL}: mail ${operation} ${why}; under ${gate.ruling} this mailbox transmits `
+    + `only to the promoter group (and the agent mailboxes). ${instead}`;
+  await recordSideEffect(`mail.${operation}`, 'blocked', params.mailbox || null, { reason, outside });
+  return reason;
+}
+
+// --------------------------------------------------------------------------
+// The request's own message id (live test 2026-11-18 02:15 UTC: a woken lead retyped the 152-character Graph id with
+// 32 characters missing and Graph answered "Id is malformed"). An email request's policy names the message the run
+// answers (`reply_email_id`, communication-agent src/policy.py). mail emailId "original", and a reply or
+// draft_reply_all with no emailId, take that id (written into the call's args here, before the handler runs); a reply
+// or draft_reply_all naming any other id is refused, naming where the id comes from. Without the key nothing changes.
+// --------------------------------------------------------------------------
+const ORIGINAL_EMAIL_ID = 'original';
+const REQUEST_EMAIL_ID_REFUSAL = 'REQUEST_EMAIL_ID';
+const REQUEST_EMAIL_ID_OPERATIONS = Object.freeze(new Set(['reply', 'draft_reply_all']));
+
+function requestEmailId(policy = getExecutionPolicy()) {
+  const own = policy?.reply_email_id;
+  return typeof own === 'string' && own.trim() ? own.trim() : null;
+}
+
+/** Substitutes the request's own id into `args.emailId` in place; returns a refusal or null. */
+function applyRequestEmailId(toolName, args) {
+  if (toolName !== 'mail' || !args || typeof args !== 'object') return null;
+  const own = requestEmailId();
+  const given = typeof args.emailId === 'string' ? args.emailId.trim() : args.emailId;
+  const named = typeof given === 'string' && given.toLowerCase() === ORIGINAL_EMAIL_ID;
+  const answers = REQUEST_EMAIL_ID_OPERATIONS.has(args.operation);
+  if (!own) {
+    return named
+      ? `${REQUEST_EMAIL_ID_REFUSAL}: emailId "original" names the message this run was dispatched to answer, and `
+        + 'this run names none (no reply_email_id in COMMUNICATION_AGENT_POLICY_JSON): pass the message id itself.'
+      : null;
+  }
+  if (named || (answers && !_isPassed(given))) {
+    args.emailId = own;
+    return null;
+  }
+  if (answers && given !== own) {
+    return `${REQUEST_EMAIL_ID_REFUSAL}_MISMATCH: mail ${args.operation} answers the message this run was dispatched `
+      + `for, and the emailId given (${String(given ?? '').length} characters) is not its id (${own.length} `
+      + 'characters). Nothing was sent or drafted. Pass emailId: "original" and office-mcp uses the request\'s own id '
+      + '(COMMUNICATION_AGENT_POLICY_JSON reply_email_id); never retype the id.';
+  }
+  return null;
+}
+
 async function enforceMailPolicy(operation, params = {}) {
   const policy = getExecutionPolicy();
-  if (isLegalDraftOnly() && ['send', 'reply', 'send_draft'].includes(operation)) {
+  if (isLegalDraftOnly() && GATED_TRANSMIT_OPERATIONS.has(operation) && !recipientGate(policy)) {
     const reason = `Blocked by Legal OS draft-only policy: mail ${operation} is forbidden`;
     await recordSideEffect(`mail.${operation}`, 'blocked', params.mailbox || null, { reason });
     return reason;
@@ -430,6 +567,15 @@ async function enforceCalendarPolicy(args = {}) {
 
 module.exports = {
   LEGAL_TOOL_MANIFEST,
+  LEGAL_GATED_TRANSMIT_OPERATIONS,
+  GATED_TRANSMIT_OPERATIONS,
+  RECIPIENT_GATE_REFUSAL,
+  REQUEST_EMAIL_ID_REFUSAL,
+  ORIGINAL_EMAIL_ID,
+  recipientGate,
+  recipientGateRefusal,
+  requestEmailId,
+  applyRequestEmailId,
   OWNER_IDENTITY_SWITCH,
   OWNER_IDENTITY_REFUSAL,
   getExecutionPolicy,

@@ -94,6 +94,13 @@
       "list_tasks"
     ]
   },
+  "legal_persona_gated_transmit": {
+    "mail": [
+      "reply",
+      "send",
+      "send_draft"
+    ]
+  },
   "schema_version": "puran.office-legal-tool-surface/v1",
   "tool_names": [
     "calendar",
