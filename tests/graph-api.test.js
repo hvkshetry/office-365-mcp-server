@@ -153,3 +153,39 @@ describe('mislabelled binary downloads', () => {
     expect(result).toContain('WEBVTT');
   });
 });
+
+describe('Teams transcript content policy', () => {
+  const format = 'application/vnd.microsoft.graph.transcript+text';
+  const metadata = () => mockResponse(200, { 'content-type': 'application/json' }, [Buffer.from('{}')]);
+  const forbidden = code => mockResponse(403, { 'content-type': 'application/json' }, [
+    Buffer.from(JSON.stringify({ error: { code: 'Forbidden', message: code, innerError: { code } } }))
+  ]);
+
+  it.each(['SpeakerAttributionNotAllowed', 'GraphAccessToTranscriptsDisabled'])(
+    'handles %s without losing the transcript or retrying a tenant access refusal', async code => {
+      jest.spyOn(require('../auth'), 'ensureAuthenticated').mockResolvedValue('token');
+      try {
+        const meeting = require('../teams/consolidated/teams_meeting');
+        const requests = [];
+        const body = '00:00:02.000 --> 00:00:04.000\nReview the proposal on Friday.';
+        const responses = [metadata(), forbidden(code)];
+        if (code === 'SpeakerAttributionNotAllowed') {
+          responses.push(mockResponse(200, { 'content-type': format }, [Buffer.from(body)]));
+        }
+        installHttpsResponses(responses, requests);
+        const result = await meeting({ operation: 'get_transcript', meetingId: 'm', transcriptId: 't' });
+        if (code === 'SpeakerAttributionNotAllowed') {
+          expect(requests).toHaveLength(3);
+          expect(requests[2].options.headers.Accept).toEqual(format);
+          expect(requests[2].url).not.toContain('?');
+          expect(result.content[0].text).toContain(body);
+        } else {
+          expect(requests).toHaveLength(2);
+          expect(result.content[0].text).toContain(code);
+        }
+      } finally {
+        jest.restoreAllMocks();
+      }
+    }
+  );
+});

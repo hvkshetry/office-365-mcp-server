@@ -37,6 +37,7 @@ const config = require('../../config');
 const fs = require('fs');
 const path = require('path');
 
+const UNATTRIBUTED_FORMAT = 'application/vnd.microsoft.graph.transcript+text';
 const TRANSCRIPT_MAX_INLINE_CHARS = 30000;
 const TRANSCRIPT_TEMP_DIR = path.join(require('os').homedir(), 'temp', 'transcripts');
 
@@ -568,21 +569,26 @@ async function getTranscript(accessToken, params) {
       };
     }
     
-    // Get the actual transcript content
-    const transcriptContent = await callGraphAPI(
-      accessToken,
-      'GET',
-      `me/onlineMeetings/${actualMeetingId}/transcripts/${transcriptId}/content`,
-      null,
-      {
-        $format: format
+    const contentPath = `me/onlineMeetings/${actualMeetingId}/transcripts/${transcriptId}/content`;
+    let unattributed = format === UNATTRIBUTED_FORMAT;
+    let transcriptContent;
+    if (!unattributed) {
+      try {
+        transcriptContent = await callGraphAPI(accessToken, 'GET', contentPath, null, { $format: format });
+      } catch (error) {
+        if (format !== 'text/vtt' || error.statusCode !== 403 ||
+            error.graphError?.innerError?.code !== 'SpeakerAttributionNotAllowed') throw error;
+        unattributed = true;
       }
-    );
-    
-    // Process the VTT content to a more readable format
+    }
+    if (unattributed) {
+      transcriptContent = await callGraphAPI(accessToken, 'GET', contentPath, null, {}, { Accept: UNATTRIBUTED_FORMAT });
+    }
+
     let processedContent = "Transcript content:\n\n";
-    
-    if (typeof transcriptContent === 'string') {
+    if (unattributed && typeof transcriptContent === 'string') {
+      processedContent += transcriptContent;
+    } else if (typeof transcriptContent === 'string') {
       // Basic formatting for VTT content
       try {
         const lines = transcriptContent.split('\n');
@@ -647,8 +653,9 @@ async function getTranscript(accessToken, params) {
         const speakerLines = lines.filter(l => l.includes(': '));
         const speakers = [...new Set(speakerLines.map(l => l.split(':')[0].trim()))];
         const summary = [
-          `Transcript retrieved (${processedContent.length.toLocaleString()} chars, ${speakerLines.length} utterances).`,
-          `Speakers: ${speakers.join(', ')}`,
+          unattributed ? `Transcript retrieved (${processedContent.length.toLocaleString()} chars).` :
+            `Transcript retrieved (${processedContent.length.toLocaleString()} chars, ${speakerLines.length} utterances).`,
+          unattributed ? 'Speaker attribution unavailable.' : `Speakers: ${speakers.join(', ')}`,
           ``,
           `Full transcript saved to: ${filePath}`,
           ``,

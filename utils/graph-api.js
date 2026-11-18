@@ -301,6 +301,7 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
         // JSON parsing below is unaffected (json is classified as text here).
         const isTextResponse = responseContentType.includes('json') ||
                                responseContentType.startsWith('text/') ||
+                               responseContentType.split(';')[0].trim().toLowerCase() === 'application/vnd.microsoft.graph.transcript+text' ||
                                responseContentType.includes('xml') ||
                                responseContentType.includes('csv') ||
                                responseContentType.includes('javascript') ||
