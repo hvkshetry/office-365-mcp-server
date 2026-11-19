@@ -11,7 +11,8 @@ const { callGraphAPI } = require('../utils/graph-api');
 const { safeTool } = require('../utils/errors');
 const { validateId } = require('../utils/validate');
 const config = require('../config');
-const { enforceMailPolicy, recipientGateRefusal, recordSideEffect } = require('../policy');
+const { enforceMailPolicy, getExecutionPolicy, recipientGateRefusal, recordSideEffect } = require('../policy');
+const sendOnce = require('./send-once');
 
 // Submodule imports
 const { handleEmailSearch } = require('./search');
@@ -709,6 +710,23 @@ async function sendEmail(accessToken, params) {
       message.attachments = buildFileAttachments(params.attachments);
     }
 
+    // HOUSE-OFFICE-MCP-SEND-ONCE-20261119: a keyed send (policy.send_once) goes out exactly once: the sent ledger or
+    // the mailbox's Sent Items already holding the key answers "already sent" and nothing is sent again.
+    const once = sendOnce.sendOnceOf(typeof getExecutionPolicy === 'function' ? getExecutionPolicy() : null);
+    if (once) {
+      const prior = await sendOnce.alreadySent(once, config.getMailboxPrefix(params.mailbox),
+        (method, endpoint, body, query) => callGraphAPI(accessToken, method, endpoint, body, query));
+      if (prior.sent) {
+        await recordSideEffect('mail.send', 'success', params.mailbox || null, {
+          to: toRecipients, subject: params.subject, send_key: once.key, already_sent: true, witness: prior.witness
+        });
+        return {
+          content: [{ type: "text", text: `Email already sent for ${once.key} (${prior.witness}); not sent again (${sendOnce.SEND_ONCE_RULING_ID}).` }]
+        };
+      }
+      sendOnce.stampSendKey(message, once.key);
+    }
+
     const sendEndpoint = `${config.getMailboxPrefix(params.mailbox)}/sendMail`;
     await callGraphAPI(
       accessToken,
@@ -720,13 +738,17 @@ async function sendEmail(accessToken, params) {
       },
       null
     );
+    if (once) {
+      sendOnce.recordSent(once, { to: toRecipients, subject: params.subject, mailbox: params.mailbox || null });
+    }
 
     const attachCount = message.attachments ? message.attachments.length : 0;
     const attachMsg = attachCount > 0 ? ` with ${attachCount} attachment(s)` : '';
     await recordSideEffect('mail.send', 'success', params.mailbox || null, {
       to: toRecipients,
       subject: params.subject,
-      attachments: attachCount
+      attachments: attachCount,
+      ...(once ? { send_key: once.key } : {})
     });
     return {
       content: [{ type: "text", text: `Email sent successfully${attachMsg}!` }]
