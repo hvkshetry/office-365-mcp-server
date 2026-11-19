@@ -718,28 +718,52 @@ async function sendEmail(accessToken, params) {
         (method, endpoint, body, query) => callGraphAPI(accessToken, method, endpoint, body, query));
       if (prior.sent) {
         await recordSideEffect('mail.send', 'success', params.mailbox || null, {
-          to: toRecipients, subject: params.subject, send_key: once.key, already_sent: true, witness: prior.witness
+          to: toRecipients, subject: params.subject, send_key: once.key, already_sent: true, witness: prior.witness,
+          ...(prior.ledgerWriteError ? { ledger_write_failed: true, ledger_error: String(prior.ledgerWriteError).slice(0, 300) } : {})
         });
         return {
           content: [{ type: "text", text: `Email already sent for ${once.key} (${prior.witness}); not sent again (${sendOnce.SEND_ONCE_RULING_ID}).` }]
         };
       }
-      sendOnce.stampSendKey(message, once.key);
     }
 
     const sendEndpoint = `${config.getMailboxPrefix(params.mailbox)}/sendMail`;
-    await callGraphAPI(
+    const postMessage = outgoing => callGraphAPI(
       accessToken,
       'POST',
       sendEndpoint,
       {
-        message: message,
+        message: outgoing,
         saveToSentItems: true
       },
       null
     );
+    let stampRejection = null;
+    let ledgerError = null;
     if (once) {
-      sendOnce.recordSent(once, { to: toRecipients, subject: params.subject, mailbox: params.mailbox || null });
+      try {
+        await postMessage(sendOnce.stampSendKey(message, once.key));
+      } catch (error) {
+        // Only a definite request-validation refusal (HTTP 400) proves nothing went out: send once more, unstamped,
+        // so the day's email is not lost to the stamp. A timeout, a 5xx or anything ambiguous is never retried here:
+        // the first send may have gone out.
+        if (!sendOnce.definiteStampRejection(error)) {
+          throw error;
+        }
+        stampRejection = String(error.message || error).slice(0, 300);
+        console.error(`[EMAIL] Send key stamp refused by Graph (${stampRejection}); sending once unstamped`);
+        await postMessage(message);
+      }
+      // Graph accepted the send: a ledger that cannot be written never fails the call (Sent Items is the witness).
+      ledgerError = sendOnce.recordSent(once, {
+        to: toRecipients, subject: params.subject, mailbox: params.mailbox || null,
+        ...(stampRejection ? { stamp_rejected: true } : {})
+      });
+      if (ledgerError) {
+        console.error(`[EMAIL] Sent ledger not written for ${once.key}: ${ledgerError}`);
+      }
+    } else {
+      await postMessage(message);
     }
 
     const attachCount = message.attachments ? message.attachments.length : 0;
@@ -748,7 +772,9 @@ async function sendEmail(accessToken, params) {
       to: toRecipients,
       subject: params.subject,
       attachments: attachCount,
-      ...(once ? { send_key: once.key } : {})
+      ...(once ? { send_key: once.key } : {}),
+      ...(stampRejection ? { stamp_rejected: true, stamp_rejection: stampRejection } : {}),
+      ...(ledgerError ? { ledger_write_failed: true, ledger_error: String(ledgerError).slice(0, 300) } : {})
     });
     return {
       content: [{ type: "text", text: `Email sent successfully${attachMsg}!` }]

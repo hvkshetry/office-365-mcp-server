@@ -12,6 +12,16 @@
  * stamped with the key, sent, and the ledger written. A resumed or retried dispatch therefore completes a send that
  * never happened and repeats none. A Sent Items query that fails does not block the send (a missing daily email is
  * the worse failure); the ledger still stops any repeat that it saw.
+ *
+ * Two failures that must never cost the day's email or fail a send that went out (lead review 2026-11-19):
+ *   - Graph REJECTS the stamped sendMail with a definite request-validation error (HTTP 400, `definiteStampRejection`):
+ *     nothing went out, so the caller sends once more, unstamped, and the ledger and audit say `stamp_rejected`. A
+ *     timeout, a 5xx or any error without that status is ambiguous (the first send may have gone out): never retried.
+ *   - the ledger cannot be written after Graph accepted the send: `recordSent` returns the error instead of throwing,
+ *     the tool call still succeeds and the audit says `ledger_write_failed`. Sent Items remains the witness.
+ * Sent Items is eventually consistent: a message Graph just accepted can take seconds to show there, so a retry
+ * within seconds of a kill (after the accept, before the ledger) can miss it. The ledger and the communication-agent's
+ * audit row are the witnesses that close that window when they landed.
  */
 
 const fs = require('fs');
@@ -45,16 +55,28 @@ function writeLedger(ledgerPath, record) {
   fs.renameSync(tmp, ledgerPath);
 }
 
+/** A stamped COPY of the message; the caller keeps the unstamped one for the one retry `definiteStampRejection` allows. */
 function stampSendKey(message, key) {
-  message.singleValueExtendedProperties = [
-    ...(message.singleValueExtendedProperties || []),
-    { id: SEND_KEY_PROPERTY, value: key }
-  ];
-  message.internetMessageHeaders = [
-    ...(message.internetMessageHeaders || []),
-    { name: SEND_KEY_HEADER, value: key }
-  ];
-  return message;
+  return {
+    ...message,
+    singleValueExtendedProperties: [
+      ...(message.singleValueExtendedProperties || []),
+      { id: SEND_KEY_PROPERTY, value: key }
+    ],
+    internetMessageHeaders: [
+      ...(message.internetMessageHeaders || []),
+      { name: SEND_KEY_HEADER, value: key }
+    ]
+  };
+}
+
+/**
+ * True only when Graph answered the stamped sendMail with HTTP 400: a request-validation refusal, so nothing was
+ * sent. Anything else (a timeout or network error, which carry no status; 429; any 5xx; any other 4xx) is not a
+ * stamp rejection: it is either ambiguous or would fail unstamped too.
+ */
+function definiteStampRejection(error) {
+  return Boolean(error) && error.statusCode === 400;
 }
 
 function sentItemsQuery(mailboxPrefix, key) {
@@ -82,8 +104,13 @@ async function alreadySent(once, mailboxPrefix, callGraph) {
     if (hit) {
       const recovered = { key: once.key, job_id: once.jobId, message_id: hit.id, subject: hit.subject,
                           sent_at: hit.sentDateTime, witness: 'sent_items', ruling: SEND_ONCE_RULING_ID };
-      writeLedger(once.ledgerPath, recovered);
-      return { sent: true, witness: 'sent_items', record: recovered };
+      let ledgerWriteError = null;
+      try {
+        writeLedger(once.ledgerPath, recovered);
+      } catch (error) {   // Sent Items holds the key: the send is still "already sent", whatever the ledger does
+        ledgerWriteError = error.message;
+      }
+      return { sent: true, witness: 'sent_items', record: recovered, ...(ledgerWriteError ? { ledgerWriteError } : {}) };
     }
     return { sent: false };
   } catch (error) {
@@ -91,9 +118,15 @@ async function alreadySent(once, mailboxPrefix, callGraph) {
   }
 }
 
+/** Write the sent ledger after Graph accepted the send. Never throws: returns null, or the error text when it could not. */
 function recordSent(once, details) {
-  writeLedger(once.ledgerPath, { key: once.key, job_id: once.jobId, sent_at: new Date().toISOString(),
-                                 witness: 'send', ruling: SEND_ONCE_RULING_ID, ...details });
+  try {
+    writeLedger(once.ledgerPath, { key: once.key, job_id: once.jobId, sent_at: new Date().toISOString(),
+                                   witness: 'send', ruling: SEND_ONCE_RULING_ID, ...details });
+    return null;
+  } catch (error) {
+    return error.message;
+  }
 }
 
 module.exports = {
@@ -103,6 +136,7 @@ module.exports = {
   sendOnceOf,
   alreadySent,
   stampSendKey,
+  definiteStampRejection,
   recordSent,
   readLedger
 };
