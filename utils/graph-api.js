@@ -15,6 +15,53 @@ const RETRY_CONFIG = {
 
 const MAX_REDIRECTS = 5;
 
+// HOUSE-OFFICE-MCP-NO-SENDMAIL-AUTO-RETRY-20261119 (owner, 2026-11-19): a sendMail that Graph answers with 503 or 504
+// may have gone out, so it is never retried automatically: a retry could deliver the email twice. A 429 was throttled
+// before anything was sent and still retries. The caller gets an error that says the send is unconfirmed and how to
+// check Sent Items before sending again; a keyed send (email/send-once.js) checks its witnesses first by itself.
+const NO_SENDMAIL_AUTO_RETRY_RULING_ID = 'HOUSE-OFFICE-MCP-NO-SENDMAIL-AUTO-RETRY-20261119';
+const UNCONFIRMED_SEND_STATUSES = [503, 504];
+
+/**
+ * True for the Graph call that sends a new email: POST .../sendMail.
+ */
+function isSendMailCall(method, path) {
+  return String(method || '').toUpperCase() === 'POST' &&
+    /(^|\/)sendMail\/?$/.test(String(path || '').split('?')[0]);
+}
+
+/**
+ * Whether an HTTP error answer is retried automatically: the retryable statuses, except a sendMail answered 503 or
+ * 504 (NO_SENDMAIL_AUTO_RETRY_RULING_ID).
+ */
+function isRetryableStatus(method, path, statusCode) {
+  if (!RETRY_CONFIG.retryableErrors.includes(statusCode)) return false;
+  return !(isSendMailCall(method, path) && UNCONFIRMED_SEND_STATUSES.includes(statusCode));
+}
+
+/**
+ * What a caller is told when a sendMail ended without an answer that settles whether the email went out (a 5xx
+ * answer, or no answer at all).
+ */
+function unconfirmedSendGuidance(what) {
+  return `The send is UNCONFIRMED: ${what}, and Microsoft Graph may already have accepted the email, so it was ` +
+    `not retried automatically (${NO_SENDMAIL_AUTO_RETRY_RULING_ID}). Do NOT send it again yet. First check the ` +
+    'sending mailbox\'s Sent Items: mail { operation: "search", mailbox: "<the sending mailbox>", folderName: "sent", ' +
+    'query: "<the subject>", startDate: "1d" }. Sent Items can take up to a minute to show a message Graph just ' +
+    'accepted, so if it is not there, wait a minute and search once more. If the email is in Sent Items it went out: ' +
+    'do not send again. Only if it is still absent, send it once more.';
+}
+
+/**
+ * Marks an error of a sendMail whose outcome is unknown and puts the guidance in its message.
+ */
+function asUnconfirmedSend(error, what) {
+  error.message = `${error.message}\n${unconfirmedSendGuidance(what)}`;
+  error.sendUnconfirmed = true;
+  error.ruling = NO_SENDMAIL_AUTO_RETRY_RULING_ID;
+  return error;
+}
+
 // Error message enhancements
 const ERROR_SUGGESTIONS = {
   401: 'Authentication token may have expired. Please re-authenticate.',
@@ -104,9 +151,16 @@ function looksBinary(buf) {
   return buf.subarray(0, 8192).includes(0x00);
 }
 
-function createGraphAPIError(statusCode, responseData, parsedError, responseHeaders = {}) {
+function createGraphAPIError(statusCode, responseData, parsedError, responseHeaders = {}, { unconfirmedSend = false } = {}) {
   const graphError = normalizeGraphError(statusCode, parsedError, responseData, responseHeaders);
   const errorMessage = graphError.message || responseData;
+  if (unconfirmedSend) {
+    // a sendMail answered 5xx: no "will be retried" or "try again later" suggestion, which would invite a duplicate
+    const error = new Error(`API call failed with status ${statusCode}: ${errorMessage}`);
+    error.statusCode = statusCode;
+    error.graphError = graphError;
+    return asUnconfirmedSend(error, `sendMail was answered with HTTP ${statusCode}`);
+  }
   const suggestion = ERROR_SUGGESTIONS[statusCode] || '';
   const fullMessage = suggestion
     ? `API call failed with status ${statusCode}: ${errorMessage}\nSuggestion: ${suggestion}`
@@ -365,8 +419,8 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
               }
             }
           } else {
-            // Handle other errors with retry logic
-            const shouldRetry = RETRY_CONFIG.retryableErrors.includes(res.statusCode) && 
+            // Handle other errors with retry logic; a sendMail answered 503/504 is never retried automatically
+            const shouldRetry = isRetryableStatus(method, path, res.statusCode) &&
                               retryCount < RETRY_CONFIG.maxRetries;
             
             if (shouldRetry) {
@@ -386,19 +440,25 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
               return;
             }
             
-            // Parse error and add suggestions while preserving the structured Graph error.
+            // Parse error and add suggestions while preserving the structured Graph error. A sendMail answered with
+            // any 5xx is an unconfirmed send: its error says so and how to check before sending again.
+            const errorOptions = { unconfirmedSend: isSendMailCall(method, path) && res.statusCode >= 500 };
             try {
               const errorData = JSON.parse(responseData);
-              reject(createGraphAPIError(res.statusCode, responseData, errorData, res.headers));
+              reject(createGraphAPIError(res.statusCode, responseData, errorData, res.headers, errorOptions));
             } catch (parseError) {
-              reject(createGraphAPIError(res.statusCode, responseData, null, res.headers));
+              reject(createGraphAPIError(res.statusCode, responseData, null, res.headers, errorOptions));
             }
           }
         });
       });
       
       req.on('error', (error) => {
-        reject(new Error(`Network error during API call: ${error.message}`));
+        const networkError = new Error(`Network error during API call: ${error.message}`);
+        // a sendMail that lost its connection has no answer at all: Graph may or may not have taken the email
+        reject(isSendMailCall(method, path)
+          ? asUnconfirmedSend(networkError, 'the connection failed before sendMail was answered')
+          : networkError);
       });
 
       // Write request body if present
@@ -423,5 +483,8 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
 module.exports = {
   callGraphAPI,
   getAnchorMailboxFromPath,
-  createGraphAPIError
+  createGraphAPIError,
+  isSendMailCall,
+  isRetryableStatus,
+  NO_SENDMAIL_AUTO_RETRY_RULING_ID
 };

@@ -1,7 +1,10 @@
 const { describe, it, expect, beforeEach } = require('@jest/globals');
 const { EventEmitter } = require('events');
 const https = require('https');
-const { createGraphAPIError, getAnchorMailboxFromPath } = require('../utils/graph-api');
+const {
+  callGraphAPI, createGraphAPIError, getAnchorMailboxFromPath, isRetryableStatus, isSendMailCall,
+  NO_SENDMAIL_AUTO_RETRY_RULING_ID
+} = require('../utils/graph-api');
 
 jest.mock('https');
 
@@ -188,4 +191,94 @@ describe('Teams transcript content policy', () => {
       }
     }
   );
+});
+
+// HOUSE-OFFICE-MCP-NO-SENDMAIL-AUTO-RETRY-20261119: a sendMail Graph answers with 503 or 504 may have gone out, so it
+// is never retried automatically; a 429 (throttled, nothing sent) still retries. The error says the send is
+// unconfirmed and how to check Sent Items before sending again. Every other call keeps its retry.
+describe('sendMail is never retried automatically on 503/504', () => {
+  const SEND = 'users/agent@example.com/sendMail';
+  const busy = status => mockResponse(status, { 'content-type': 'application/json' },
+    [Buffer.from(JSON.stringify({ error: { code: 'ServiceUnavailable', message: 'The service is unavailable.' } }))]);
+  const accepted = () => mockResponse(202, {}, []);    // Graph answers sendMail 202 Accepted with no body
+  const ok = () => mockResponse(200, { 'content-type': 'application/json' }, [Buffer.from('{"value":[]}')]);
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it.each([503, 504])('a sendMail answered %i is sent to Graph once and reported unconfirmed', async status => {
+    const requests = [];
+    installHttpsResponses([busy(status), accepted()], requests);
+    const error = await callGraphAPI('access-token', 'POST', SEND, { message: {} }, null).catch(e => e);
+    expect(requests).toHaveLength(1);                       // the 202 waiting behind it was never asked for
+    expect(error).toBeInstanceOf(Error);
+    expect(error.sendUnconfirmed).toBe(true);
+    expect(error.statusCode).toBe(status);
+    expect(error.ruling).toBe(NO_SENDMAIL_AUTO_RETRY_RULING_ID);
+    expect(error.message).toContain(`The send is UNCONFIRMED: sendMail was answered with HTTP ${status}`);
+    expect(error.message).toContain(NO_SENDMAIL_AUTO_RETRY_RULING_ID);
+    expect(error.message).toContain('Do NOT send it again yet');
+    expect(error.message).toContain('mail { operation: "search", mailbox: "<the sending mailbox>", folderName: "sent"');
+    expect(error.message).toContain('If the email is in Sent Items it went out: do not send again');
+    expect(error.message).not.toMatch(/retried automatically\.|try again later/i);
+    expect(error.graphError.code).toBe('ServiceUnavailable');   // the structured Graph error is kept
+  });
+
+  it('a throttled sendMail (429) still retries, and the email goes out once', async () => {
+    const requests = [];
+    installHttpsResponses([busy(429), accepted()], requests);
+    await callGraphAPI('access-token', 'POST', SEND, { message: {} }, null);
+    expect(requests).toHaveLength(2);
+  });
+
+  it('a sendMail whose connection fails is unconfirmed too, and is not retried', async () => {
+    let asked = 0;
+    https.request.mockImplementation(() => {
+      asked += 1;
+      const req = new EventEmitter();
+      req.write = jest.fn();
+      req.end = () => process.nextTick(() => req.emit('error', new Error('socket hang up')));
+      return req;
+    });
+    const error = await callGraphAPI('access-token', 'POST', 'me/sendMail', { message: {} }, null).catch(e => e);
+    expect(asked).toBe(1);
+    expect(error.sendUnconfirmed).toBe(true);
+    expect(error.statusCode).toBeUndefined();               // so a keyed send never takes it for a refused stamp
+    expect(error.message).toContain('Network error during API call: socket hang up');
+    expect(error.message).toContain('The send is UNCONFIRMED: the connection failed before sendMail was answered');
+  });
+
+  it('a sendMail refused outright (400, 403) is a plain error, and a 500 is unconfirmed without any retry', async () => {
+    for (const status of [400, 403]) {
+      const requests = [];
+      installHttpsResponses([busy(status)], requests);
+      const error = await callGraphAPI('access-token', 'POST', SEND, { message: {} }, null).catch(e => e);
+      expect(requests).toHaveLength(1);
+      expect(error.statusCode).toBe(status);
+      expect(error.sendUnconfirmed).toBeUndefined();
+    }
+    const requests = [];
+    installHttpsResponses([busy(500)], requests);
+    const error = await callGraphAPI('access-token', 'POST', SEND, { message: {} }, null).catch(e => e);
+    expect(requests).toHaveLength(1);
+    expect(error.sendUnconfirmed).toBe(true);
+    expect(error.message).not.toContain('Please try again later');
+  });
+
+  it('every other call keeps its automatic retry: a read, and the other calls that transmit mail', async () => {
+    const reads = [];
+    installHttpsResponses([busy(503), ok()], reads);
+    await expect(callGraphAPI('access-token', 'GET', 'users/agent@example.com/messages', null, {})).resolves.toEqual({ value: [] });
+    expect(reads).toHaveLength(2);
+    // send a draft, reply, reply-all: unchanged under this ruling (the owner question of its report)
+    for (const path of ['me/messages/AAMk/send', 'me/messages/AAMk/reply', 'me/messages/AAMk/replyAll']) {
+      expect(isSendMailCall('POST', path)).toBe(false);
+      expect([429, 503, 504].map(status => isRetryableStatus('POST', path, status))).toEqual([true, true, true]);
+    }
+    expect(isSendMailCall('POST', 'me/sendMail')).toBe(true);
+    expect(isSendMailCall('POST', 'users/agent@example.com/sendMail')).toBe(true);
+    expect(isSendMailCall('GET', 'me/sendMail')).toBe(false);
+    expect([429, 503, 504].map(status => isRetryableStatus('POST', SEND, status))).toEqual([true, false, false]);
+  });
 });

@@ -781,10 +781,29 @@ async function sendEmail(accessToken, params) {
     };
   } catch (error) {
     console.error('[EMAIL] Send error:', error.message);
+    // HOUSE-OFFICE-MCP-NO-SENDMAIL-AUTO-RETRY-20261119: a sendMail answered 5xx, or not answered, was not retried: the
+    // email may have gone out. The audit row says so, and the agent is told to check Sent Items before sending again.
+    const unconfirmed = Boolean(error && error.sendUnconfirmed);
     await recordSideEffect('mail.send', 'failed', params?.mailbox || null, {
       error: error.message,
-      subject: params?.subject || null
+      subject: params?.subject || null,
+      ...(unconfirmed ? { send_unconfirmed: true, status_code: error.statusCode || null } : {})
     });
+    if (unconfirmed) {
+      let keyed = null;
+      try {
+        keyed = sendOnce.sendOnceOf(typeof getExecutionPolicy === 'function' ? getExecutionPolicy() : null);
+      } catch (policyError) {
+        keyed = null;
+      }
+      const keyedNote = keyed
+        ? `\nThis send is keyed (${keyed.key}): a repeated mail send in this dispatch asks Sent Items for that key ` +
+          'first and sends nothing if the email is there, so after waiting a minute it is safe to send again.'
+        : '';
+      return {
+        content: [{ type: "text", text: `Email send UNCONFIRMED: ${error.message}${keyedNote}` }]
+      };
+    }
     return {
       content: [{ type: "text", text: `Email send error: ${error.message}` }]
     };
