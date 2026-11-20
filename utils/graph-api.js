@@ -15,50 +15,107 @@ const RETRY_CONFIG = {
 
 const MAX_REDIRECTS = 5;
 
-// HOUSE-OFFICE-MCP-NO-SENDMAIL-AUTO-RETRY-20261119 (owner, 2026-11-19): a sendMail that Graph answers with 503 or 504
-// may have gone out, so it is never retried automatically: a retry could deliver the email twice. A 429 was throttled
-// before anything was sent and still retries. The caller gets an error that says the send is unconfirmed and how to
-// check Sent Items before sending again; a keyed send (email/send-once.js) checks its witnesses first by itself.
+// HOUSE-OFFICE-MCP-NO-SENDMAIL-AUTO-RETRY-20261119 and HOUSE-OFFICE-MCP-NO-AUTO-RETRY-ALL-MAIL-TRANSMITS-20261119
+// (owner, 2026-11-19): a call that transmits mail and is answered with 503 or 504 may have gone out, so it is never
+// retried automatically: a retry could deliver the email twice. That is sendMail, sending a draft
+// (POST messages/{id}/send), reply and reply-all. A 429 was throttled before anything was sent and still retries.
+// The caller gets an error that says the send is unconfirmed and how to check Sent Items before sending again; a
+// keyed send (email/send-once.js) checks its witnesses first by itself. Teams posts are outside these rulings.
 const NO_SENDMAIL_AUTO_RETRY_RULING_ID = 'HOUSE-OFFICE-MCP-NO-SENDMAIL-AUTO-RETRY-20261119';
+const NO_AUTO_RETRY_ALL_MAIL_TRANSMITS_RULING_ID = 'HOUSE-OFFICE-MCP-NO-AUTO-RETRY-ALL-MAIL-TRANSMITS-20261119';
 const UNCONFIRMED_SEND_STATUSES = [503, 504];
+
+// Each call that transmits mail: how its path ends, what went out, and how to check for it before sending again.
+const MAIL_TRANSMITS = {
+  sendMail: {
+    path: /(^|\/)sendMail\/?$/,
+    ruling: NO_SENDMAIL_AUTO_RETRY_RULING_ID,
+    call: 'sendMail',
+    thing: 'the email',
+    check: 'First check the sending mailbox\'s Sent Items: mail { operation: "search", mailbox: "<the sending ' +
+      'mailbox>", folderName: "sent", query: "<the subject>", startDate: "1d" }.',
+    again: 'send it once more'
+  },
+  sendDraft: {
+    path: /(^|\/)messages\/[^/]+\/send\/?$/,
+    ruling: NO_AUTO_RETRY_ALL_MAIL_TRANSMITS_RULING_ID,
+    call: 'the send of the draft',
+    thing: 'the draft',
+    check: 'First check whether the draft went out. A sent draft leaves Drafts and appears in Sent Items, so search ' +
+      'both: mail { operation: "search", mailbox: "<the sending mailbox>", folderName: "sent", query: "<the ' +
+      'draft\'s subject>", startDate: "1d" }, then the same search with folderName: "drafts".',
+    again: 'send the same draft once more (mail { operation: "send_draft", draftId: "<the draft>" }), never a new copy'
+  },
+  reply: {
+    path: /(^|\/)messages\/[^/]+\/reply\/?$/,
+    ruling: NO_AUTO_RETRY_ALL_MAIL_TRANSMITS_RULING_ID,
+    call: 'the reply',
+    thing: 'the reply',
+    check: 'First check the replying mailbox\'s Sent Items for the reply, whose subject is the original\'s, usually ' +
+      'with "RE:" before it: mail { operation: "search", mailbox: "<the replying mailbox>", folderName: "sent", ' +
+      'query: "<the original subject>", startDate: "1d" }.',
+    again: 'reply once more'
+  },
+  replyAll: {
+    path: /(^|\/)messages\/[^/]+\/replyAll\/?$/,
+    ruling: NO_AUTO_RETRY_ALL_MAIL_TRANSMITS_RULING_ID,
+    call: 'the reply-all',
+    thing: 'the reply',
+    check: 'First check the replying mailbox\'s Sent Items for the reply, whose subject is the original\'s, usually ' +
+      'with "RE:" before it: mail { operation: "search", mailbox: "<the replying mailbox>", folderName: "sent", ' +
+      'query: "<the original subject>", startDate: "1d" }.',
+    again: 'reply once more'
+  }
+};
+
+/**
+ * Which mail-transmitting call this is ('sendMail', 'sendDraft', 'reply', 'replyAll'), or null for any other call.
+ * Creating a draft or a reply draft (POST messages, createReply, createReplyAll) transmits nothing.
+ */
+function mailTransmitCall(method, path) {
+  if (String(method || '').toUpperCase() !== 'POST') return null;
+  const bare = String(path || '').split('?')[0];
+  return Object.keys(MAIL_TRANSMITS).find(kind => MAIL_TRANSMITS[kind].path.test(bare)) || null;
+}
 
 /**
  * True for the Graph call that sends a new email: POST .../sendMail.
  */
 function isSendMailCall(method, path) {
-  return String(method || '').toUpperCase() === 'POST' &&
-    /(^|\/)sendMail\/?$/.test(String(path || '').split('?')[0]);
+  return mailTransmitCall(method, path) === 'sendMail';
 }
 
 /**
- * Whether an HTTP error answer is retried automatically: the retryable statuses, except a sendMail answered 503 or
- * 504 (NO_SENDMAIL_AUTO_RETRY_RULING_ID).
+ * Whether an HTTP error answer is retried automatically: the retryable statuses, except a call that transmits mail
+ * answered 503 or 504.
  */
 function isRetryableStatus(method, path, statusCode) {
   if (!RETRY_CONFIG.retryableErrors.includes(statusCode)) return false;
-  return !(isSendMailCall(method, path) && UNCONFIRMED_SEND_STATUSES.includes(statusCode));
+  return !(mailTransmitCall(method, path) && UNCONFIRMED_SEND_STATUSES.includes(statusCode));
 }
 
 /**
- * What a caller is told when a sendMail ended without an answer that settles whether the email went out (a 5xx
- * answer, or no answer at all).
+ * What a caller is told when a call that transmits mail ended without an answer that settles whether the mail went
+ * out (a 5xx answer, or no answer at all). `what` says how it ended; `kind` is the call (mailTransmitCall).
  */
-function unconfirmedSendGuidance(what) {
-  return `The send is UNCONFIRMED: ${what}, and Microsoft Graph may already have accepted the email, so it was ` +
-    `not retried automatically (${NO_SENDMAIL_AUTO_RETRY_RULING_ID}). Do NOT send it again yet. First check the ` +
-    'sending mailbox\'s Sent Items: mail { operation: "search", mailbox: "<the sending mailbox>", folderName: "sent", ' +
-    'query: "<the subject>", startDate: "1d" }. Sent Items can take up to a minute to show a message Graph just ' +
-    'accepted, so if it is not there, wait a minute and search once more. If the email is in Sent Items it went out: ' +
-    'do not send again. Only if it is still absent, send it once more.';
+function unconfirmedSendGuidance(what, kind = 'sendMail') {
+  const transmit = MAIL_TRANSMITS[kind] || MAIL_TRANSMITS.sendMail;
+  return `The send is UNCONFIRMED: ${what}, and Microsoft Graph may already have accepted ${transmit.thing}, so it ` +
+    `was not retried automatically (${transmit.ruling}). Do NOT send it again yet. ${transmit.check} Sent Items can ` +
+    'take up to a minute to show a message Graph just accepted, so if it is not there, wait a minute and search ' +
+    `once more. If ${transmit.thing} is in Sent Items it went out: do not send again. Only if it is still absent, ` +
+    `${transmit.again}.`;
 }
 
 /**
- * Marks an error of a sendMail whose outcome is unknown and puts the guidance in its message.
+ * Marks an error of a mail-transmitting call whose outcome is unknown and puts the guidance in its message.
  */
-function asUnconfirmedSend(error, what) {
-  error.message = `${error.message}\n${unconfirmedSendGuidance(what)}`;
+function asUnconfirmedSend(error, what, kind = 'sendMail') {
+  const transmit = MAIL_TRANSMITS[kind] ? kind : 'sendMail';
+  error.message = `${error.message}\n${unconfirmedSendGuidance(what, transmit)}`;
   error.sendUnconfirmed = true;
-  error.ruling = NO_SENDMAIL_AUTO_RETRY_RULING_ID;
+  error.transmit = transmit;
+  error.ruling = MAIL_TRANSMITS[transmit].ruling;
   return error;
 }
 
@@ -155,11 +212,13 @@ function createGraphAPIError(statusCode, responseData, parsedError, responseHead
   const graphError = normalizeGraphError(statusCode, parsedError, responseData, responseHeaders);
   const errorMessage = graphError.message || responseData;
   if (unconfirmedSend) {
-    // a sendMail answered 5xx: no "will be retried" or "try again later" suggestion, which would invite a duplicate
+    // a mail-transmitting call answered 5xx: no "will be retried" or "try again later" suggestion, which would
+    // invite a duplicate. `unconfirmedSend` is the call (mailTransmitCall); true means sendMail.
+    const kind = MAIL_TRANSMITS[unconfirmedSend] ? unconfirmedSend : 'sendMail';
     const error = new Error(`API call failed with status ${statusCode}: ${errorMessage}`);
     error.statusCode = statusCode;
     error.graphError = graphError;
-    return asUnconfirmedSend(error, `sendMail was answered with HTTP ${statusCode}`);
+    return asUnconfirmedSend(error, `${MAIL_TRANSMITS[kind].call} was answered with HTTP ${statusCode}`, kind);
   }
   const suggestion = ERROR_SUGGESTIONS[statusCode] || '';
   const fullMessage = suggestion
@@ -419,7 +478,7 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
               }
             }
           } else {
-            // Handle other errors with retry logic; a sendMail answered 503/504 is never retried automatically
+            // Handle other errors with retry logic; a call that transmits mail answered 503/504 is never retried
             const shouldRetry = isRetryableStatus(method, path, res.statusCode) &&
                               retryCount < RETRY_CONFIG.maxRetries;
             
@@ -440,9 +499,10 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
               return;
             }
             
-            // Parse error and add suggestions while preserving the structured Graph error. A sendMail answered with
-            // any 5xx is an unconfirmed send: its error says so and how to check before sending again.
-            const errorOptions = { unconfirmedSend: isSendMailCall(method, path) && res.statusCode >= 500 };
+            // Parse error and add suggestions while preserving the structured Graph error. A call that transmits mail
+            // answered with any 5xx is an unconfirmed send: its error says so and how to check before sending again.
+            const transmit = mailTransmitCall(method, path);
+            const errorOptions = { unconfirmedSend: transmit && res.statusCode >= 500 ? transmit : false };
             try {
               const errorData = JSON.parse(responseData);
               reject(createGraphAPIError(res.statusCode, responseData, errorData, res.headers, errorOptions));
@@ -455,9 +515,11 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
       
       req.on('error', (error) => {
         const networkError = new Error(`Network error during API call: ${error.message}`);
-        // a sendMail that lost its connection has no answer at all: Graph may or may not have taken the email
-        reject(isSendMailCall(method, path)
-          ? asUnconfirmedSend(networkError, 'the connection failed before sendMail was answered')
+        // a mail-transmitting call that lost its connection has no answer at all: Graph may or may not have taken it
+        const transmit = mailTransmitCall(method, path);
+        reject(transmit
+          ? asUnconfirmedSend(networkError,
+            `the connection failed before ${MAIL_TRANSMITS[transmit].call} was answered`, transmit)
           : networkError);
       });
 
@@ -485,6 +547,8 @@ module.exports = {
   getAnchorMailboxFromPath,
   createGraphAPIError,
   isSendMailCall,
+  mailTransmitCall,
   isRetryableStatus,
-  NO_SENDMAIL_AUTO_RETRY_RULING_ID
+  NO_SENDMAIL_AUTO_RETRY_RULING_ID,
+  NO_AUTO_RETRY_ALL_MAIL_TRANSMITS_RULING_ID
 };

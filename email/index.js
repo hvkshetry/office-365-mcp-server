@@ -272,6 +272,36 @@ async function createReplyViaDraftFallback(accessToken, params, prefix, fileAtta
   };
 }
 
+// HOUSE-OFFICE-MCP-NO-AUTO-RETRY-ALL-MAIL-TRANSMITS-20261119: the one place a draft is sent (send_draft, a reply with
+// attachments, a reply through the draft fallback). Graph's helper never retries this call on 503/504; when its
+// outcome is unknown the error names the draft, so the agent can be told which draft to look for and send again.
+async function sendDraftById(accessToken, prefix, draftId) {
+  try {
+    return await callGraphAPI(
+      accessToken,
+      'POST',
+      `${prefix}/messages/${draftId}/send`,
+      null,
+      null
+    );
+  } catch (error) {
+    if (error && error.sendUnconfirmed) {
+      error.draftId = draftId;
+    }
+    throw error;
+  }
+}
+
+// The audit details and the agent's text for a mail-transmitting call whose outcome is unknown.
+function unconfirmedDetails(error) {
+  if (!error || !error.sendUnconfirmed) return {};
+  return {
+    send_unconfirmed: true,
+    status_code: error.statusCode || null,
+    ...(error.draftId ? { draftId: error.draftId } : {})
+  };
+}
+
 async function sendReplyViaDraftFallback(accessToken, params, prefix, fileAttachments = []) {
   const draft = await createReplyViaDraftFallback(
     accessToken,
@@ -279,13 +309,7 @@ async function sendReplyViaDraftFallback(accessToken, params, prefix, fileAttach
     prefix,
     fileAttachments
   );
-  await callGraphAPI(
-    accessToken,
-    'POST',
-    `${prefix}/messages/${draft.draftId}/send`,
-    null,
-    null
-  );
+  await sendDraftById(accessToken, prefix, draft.draftId);
   return draft;
 }
 
@@ -909,13 +933,7 @@ async function replyToEmail(accessToken, params) {
           );
         }
 
-        await callGraphAPI(
-          accessToken,
-          'POST',
-          `${prefix}/messages/${draft.id}/send`,
-          null,
-          null
-        );
+        await sendDraftById(accessToken, prefix, draft.id);
 
         await recordSideEffect('mail.reply', 'success', params.mailbox || null, {
           emailId: params.emailId,
@@ -975,8 +993,21 @@ async function replyToEmail(accessToken, params) {
     console.error('[EMAIL] Reply error:', error.message);
     await recordSideEffect('mail.reply', 'failed', params?.mailbox || null, {
       error: error.message,
-      emailId: params?.emailId || null
+      emailId: params?.emailId || null,
+      ...unconfirmedDetails(error)
     });
+    if (error && error.sendUnconfirmed) {
+      // the reply may have gone out: the agent checks Sent Items first; a reply that was being sent as a draft is
+      // finished by sending that draft, never by replying again
+      const draftNote = error.draftId
+        ? `\nThe reply was being sent as draft ${error.draftId}. If it is still absent from Sent Items after a ` +
+          `minute and that draft is still in Drafts, send that draft (mail { operation: "send_draft", draftId: ` +
+          `"${error.draftId}" }); do not reply again, which would write a second reply.`
+        : '';
+      return {
+        content: [{ type: "text", text: `Email reply UNCONFIRMED: ${error.message}${draftNote}` }]
+      };
+    }
     return {
       content: [{ type: "text", text: `Email reply error: ${error.message}` }]
     };
@@ -1421,13 +1452,7 @@ async function sendDraft(accessToken, params) {
       return { content: [{ type: "text", text: gateRefusal }] };
     }
 
-    await callGraphAPI(
-      accessToken,
-      'POST',
-      `${config.getMailboxPrefix(mailbox)}/messages/${draftId}/send`,
-      null,
-      null
-    );
+    await sendDraftById(accessToken, config.getMailboxPrefix(mailbox), draftId);
 
     await recordSideEffect('mail.send_draft', 'success', mailbox || null, {
       draftId
@@ -1442,8 +1467,14 @@ async function sendDraft(accessToken, params) {
     console.error('Error sending draft:', error);
     await recordSideEffect('mail.send_draft', 'failed', params?.mailbox || null, {
       error: error.message,
-      draftId: params?.draftId || null
+      draftId: params?.draftId || null,
+      ...unconfirmedDetails(error)
     });
+    if (error && error.sendUnconfirmed) {
+      return {
+        content: [{ type: "text", text: `Draft send UNCONFIRMED: ${error.message}` }]
+      };
+    }
     return {
       content: [{ type: "text", text: `Error sending draft: ${error.message}` }]
     };
