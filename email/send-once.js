@@ -22,12 +22,27 @@
  * Sent Items is eventually consistent: a message Graph just accepted can take seconds to show there, so a retry
  * within seconds of a kill (after the accept, before the ledger) can miss it. The ledger and the communication-agent's
  * audit row are the witnesses that close that window when they landed.
+ *
+ * A DRAFT THAT IS THEN SENT is a keyed send too (HOUSE-OFFICE-MCP-KEYED-SEND-COVERS-SENT-DRAFT-20261120): the same
+ * ledger, the same Sent Items witness, the same stamp, the same two fallbacks. The key attaches twice:
+ *   - when the draft is WRITTEN (`mail draft`): the witnesses are asked first, and the draft is created stamped
+ *     (the extended property and the header). Already sent: no draft is written. A stamp Graph refuses with a definite
+ *     400 leaves the draft written unstamped (`stamp_rejected`).
+ *   - when the draft is SENT (`mail send_draft`): the witnesses are asked again, then the extended property is put on
+ *     the draft by PATCH (`draftStampPatch`; the same value where it is already there). That covers a draft written
+ *     by any route: a reply-all draft, one written before the dispatch, one whose stamp was refused at creation. The
+ *     stamp step sends nothing, so whatever way it fails the draft is still sent, once, and the ledger and audit say
+ *     `stamp_rejected`. Then the draft is sent and the ledger written.
+ * What a repeat does: `draft` again before anything went out writes another stamped draft (a draft is not an email;
+ * the earlier one stays in Drafts); `draft` or `send_draft` after the email went out is answered "already sent" by
+ * the ledger, or by Sent Items when the process died after Graph accepted the send and before the ledger.
  */
 
 const fs = require('fs');
 const path = require('path');
 
 const SEND_ONCE_RULING_ID = 'HOUSE-OFFICE-MCP-SEND-ONCE-20261119';  // for HOUSE-TWIN-EMAILS-EXACTLY-ONCE-20261119
+const KEYED_DRAFT_RULING_ID = 'HOUSE-OFFICE-MCP-KEYED-SEND-COVERS-SENT-DRAFT-20261120';
 // A named MAPI property in a namespace of our own: kept on the Sent Items copy and filterable through Graph.
 const SEND_KEY_PROPERTY = 'String {6f2c8a51-2b4d-4f7e-9d10-5a0c3e7b2a91} Name PuranosSendKey';
 const SEND_KEY_HEADER = 'X-Puranos-Send-Key';
@@ -68,6 +83,14 @@ function stampSendKey(message, key) {
       { name: SEND_KEY_HEADER, value: key }
     ]
   };
+}
+
+/**
+ * The PATCH body that puts the send key on a draft already written: the filterable extended property, which is what
+ * the Sent Items witness reads. (The header is written where the draft is created keyed; it is not needed here.)
+ */
+function draftStampPatch(key) {
+  return { singleValueExtendedProperties: [{ id: SEND_KEY_PROPERTY, value: key }] };
 }
 
 /**
@@ -131,11 +154,13 @@ function recordSent(once, details) {
 
 module.exports = {
   SEND_ONCE_RULING_ID,
+  KEYED_DRAFT_RULING_ID,
   SEND_KEY_PROPERTY,
   SEND_KEY_HEADER,
   sendOnceOf,
   alreadySent,
   stampSendKey,
+  draftStampPatch,
   definiteStampRejection,
   recordSent,
   readLedger

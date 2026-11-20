@@ -1282,25 +1282,59 @@ async function createDraft(accessToken, params) {
       draftMessage.attachments = buildFileAttachments(params.attachments);
     }
 
-    const response = await callGraphAPI(
-      accessToken,
-      'POST',
-      `${config.getMailboxPrefix(params.mailbox)}/messages`,
-      draftMessage,
-      null
-    );
+    // HOUSE-OFFICE-MCP-KEYED-SEND-COVERS-SENT-DRAFT-20261120: a keyed dispatch that writes its email as a draft first.
+    // The witnesses are asked before anything is written, and the draft is created carrying the key.
+    const prefix = config.getMailboxPrefix(params.mailbox);
+    const once = sendOnce.sendOnceOf(typeof getExecutionPolicy === 'function' ? getExecutionPolicy() : null);
+    if (once) {
+      const prior = await sendOnce.alreadySent(once, prefix,
+        (method, endpoint, body, query) => callGraphAPI(accessToken, method, endpoint, body, query));
+      if (prior.sent) {
+        await recordSideEffect('mail.draft', 'success', params.mailbox || null, {
+          subject: params.subject || null, send_key: once.key, already_sent: true, witness: prior.witness,
+          ...(prior.ledgerWriteError ? { ledger_write_failed: true, ledger_error: String(prior.ledgerWriteError).slice(0, 300) } : {})
+        });
+        return {
+          content: [{ type: "text", text: `Email already sent for ${once.key} (${prior.witness}); no draft was written and there is nothing to send (${sendOnce.KEYED_DRAFT_RULING_ID}).` }]
+        };
+      }
+    }
+
+    const writeDraft = outgoing => callGraphAPI(accessToken, 'POST', `${prefix}/messages`, outgoing, null);
+    let response;
+    let stampRejection = null;
+    if (once) {
+      try {
+        response = await writeDraft(sendOnce.stampSendKey(draftMessage, once.key));
+      } catch (error) {
+        // only a definite refusal of the stamped draft: it is written once more, unstamped; send_draft stamps again
+        if (!sendOnce.definiteStampRejection(error)) {
+          throw error;
+        }
+        stampRejection = String(error.message || error).slice(0, 300);
+        console.error(`[EMAIL] Graph refused the stamped draft for ${once.key}; writing it unstamped: ${stampRejection}`);
+        response = await writeDraft(draftMessage);
+      }
+    } else {
+      response = await writeDraft(draftMessage);
+    }
 
     const attachCount = draftMessage.attachments ? draftMessage.attachments.length : 0;
     const attachMsg = attachCount > 0 ? `\nAttachments: ${attachCount}` : '';
     await recordSideEffect('mail.draft', 'success', params.mailbox || null, {
       draftId: response.id,
       subject: response.subject || params.subject || null,
-      attachments: attachCount
+      attachments: attachCount,
+      ...(once ? { send_key: once.key } : {}),
+      ...(stampRejection ? { stamp_rejected: true, stamp_rejection: stampRejection } : {})
     });
+    const keyedMsg = once
+      ? `\nKeyed send ${once.key}: send this draft with mail { operation: "send_draft", draftId: "${response.id}" }; it goes out once.`
+      : '';
     return {
       content: [{
         type: "text",
-        text: `Draft created successfully!\nDraft ID: ${response.id}\nSubject: ${response.subject || '(No subject)'}${attachMsg}`
+        text: `Draft created successfully!\nDraft ID: ${response.id}\nSubject: ${response.subject || '(No subject)'}${attachMsg}${keyedMsg}`
       }]
     };
   } catch (error) {
@@ -1452,10 +1486,52 @@ async function sendDraft(accessToken, params) {
       return { content: [{ type: "text", text: gateRefusal }] };
     }
 
-    await sendDraftById(accessToken, config.getMailboxPrefix(mailbox), draftId);
+    // HOUSE-OFFICE-MCP-KEYED-SEND-COVERS-SENT-DRAFT-20261120: a keyed dispatch sending its draft goes out exactly once,
+    // as a keyed `mail send` does: the sent ledger or Sent Items already holding the key answers "already sent".
+    const prefix = config.getMailboxPrefix(mailbox);
+    const once = sendOnce.sendOnceOf(typeof getExecutionPolicy === 'function' ? getExecutionPolicy() : null);
+    let stampRejection = null;
+    let ledgerError = null;
+    if (once) {
+      const prior = await sendOnce.alreadySent(once, prefix,
+        (method, endpoint, body, query) => callGraphAPI(accessToken, method, endpoint, body, query));
+      if (prior.sent) {
+        await recordSideEffect('mail.send_draft', 'success', mailbox || null, {
+          draftId, send_key: once.key, already_sent: true, witness: prior.witness,
+          ...(prior.ledgerWriteError ? { ledger_write_failed: true, ledger_error: String(prior.ledgerWriteError).slice(0, 300) } : {})
+        });
+        return {
+          content: [{ type: "text", text: `Email already sent for ${once.key} (${prior.witness}); the draft was not sent (${sendOnce.KEYED_DRAFT_RULING_ID}).` }]
+        };
+      }
+      // The stamp, on whatever wrote the draft (the same value where `mail draft` already put it). It sends nothing,
+      // so however it fails the draft is still sent, once: a stamp that cannot be put on never costs the email.
+      try {
+        await callGraphAPI(accessToken, 'PATCH', `${prefix}/messages/${draftId}`, sendOnce.draftStampPatch(once.key), null);
+      } catch (error) {
+        stampRejection = String(error.message || error).slice(0, 300);
+        console.error(`[EMAIL] The send key could not be put on draft ${draftId} for ${once.key}; sending it unstamped: ${stampRejection}`);
+      }
+    }
+
+    await sendDraftById(accessToken, prefix, draftId);
+
+    if (once) {
+      // Graph accepted the send: a ledger that cannot be written never fails the call (Sent Items is the witness).
+      ledgerError = sendOnce.recordSent(once, {
+        via: 'send_draft', draft_id: draftId, mailbox: mailbox || null, ruling: sendOnce.KEYED_DRAFT_RULING_ID,
+        ...(stampRejection ? { stamp_rejected: true } : {})
+      });
+      if (ledgerError) {
+        console.error(`[EMAIL] Sent ledger not written for ${once.key}: ${ledgerError}`);
+      }
+    }
 
     await recordSideEffect('mail.send_draft', 'success', mailbox || null, {
-      draftId
+      draftId,
+      ...(once ? { send_key: once.key } : {}),
+      ...(stampRejection ? { stamp_rejected: true, stamp_rejection: stampRejection } : {}),
+      ...(ledgerError ? { ledger_write_failed: true, ledger_error: String(ledgerError).slice(0, 300) } : {})
     });
     return {
       content: [{
@@ -1471,8 +1547,18 @@ async function sendDraft(accessToken, params) {
       ...unconfirmedDetails(error)
     });
     if (error && error.sendUnconfirmed) {
+      let keyed = null;
+      try {
+        keyed = sendOnce.sendOnceOf(typeof getExecutionPolicy === 'function' ? getExecutionPolicy() : null);
+      } catch (policyError) {
+        keyed = null;
+      }
+      const keyedNote = keyed
+        ? `\nThis send is keyed (${keyed.key}): a repeated send_draft asks Sent Items for that key first and sends ` +
+          'nothing if the email is there, so after waiting a minute it is safe to send the draft again.'
+        : '';
       return {
-        content: [{ type: "text", text: `Draft send UNCONFIRMED: ${error.message}` }]
+        content: [{ type: "text", text: `Draft send UNCONFIRMED: ${error.message}${keyedNote}` }]
       };
     }
     return {
